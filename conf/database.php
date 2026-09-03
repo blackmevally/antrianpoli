@@ -1,11 +1,12 @@
 <?php
 /**
- * Database foundation untuk endpoint/API.
+ * Database foundation untuk endpoint/API baru.
+ * Credential produksi tidak disimpan di repository.
  *
- * Urutan konfigurasi:
- * 1. conf/database.local.php (khusus localhost, tidak di-commit)
- * 2. Environment variable DB_HOST/DB_USER/DB_PASS/DB_NAME
- * 3. Default XAMPP: 127.0.0.1 / root / kosong / sik
+ * Prioritas konfigurasi:
+ * 1. conf/database.local.php (khusus mesin lokal, tidak di-commit)
+ * 2. environment variable
+ * 3. default localhost/XAMPP
  */
 
 function db()
@@ -16,17 +17,17 @@ function db()
         return $connection;
     }
 
-    $localConfig = __DIR__ . '/database.local.php';
-    $config = is_file($localConfig) ? require $localConfig : [];
-    if (!is_array($config)) {
-        $config = [];
+    $localFile = __DIR__ . '/database.local.php';
+    $local = is_file($localFile) ? require $localFile : [];
+    if (!is_array($local)) {
+        $local = [];
     }
 
-    $host = $config['host'] ?? (getenv('DB_HOST') ?: '127.0.0.1');
-    $user = $config['user'] ?? (getenv('DB_USER') ?: 'root');
-    $pass = $config['pass'] ?? (getenv('DB_PASS') ?: '');
-    $name = $config['name'] ?? (getenv('DB_NAME') ?: 'sik');
-    $port = (int)($config['port'] ?? (getenv('DB_PORT') ?: 3306));
+    $host = $local['host'] ?? (getenv('DB_HOST') ?: '127.0.0.1');
+    $port = (int)($local['port'] ?? (getenv('DB_PORT') ?: 3306));
+    $user = $local['user'] ?? (getenv('DB_USER') ?: 'root');
+    $pass = $local['pass'] ?? (getenv('DB_PASS') ?: '');
+    $name = $local['name'] ?? (getenv('DB_NAME') ?: 'sik');
 
     mysqli_report(MYSQLI_REPORT_OFF);
     $connection = mysqli_connect($host, $user, $pass, $name, $port);
@@ -93,17 +94,22 @@ function api_json($data)
 function load_queue_config()
 {
     $file = dirname(__DIR__) . '/config_suara.json';
+    $localFile = dirname(__DIR__) . '/config_suara.local.json';
 
-    if (!is_file($file)) {
-        return ['poli_aktif' => [], 'dokter_aktif' => []];
+    $config = [];
+    if (is_file($file)) {
+        $raw = file_get_contents($file);
+        $decoded = json_decode($raw ?: '', true);
+        if (is_array($decoded)) $config = $decoded;
     }
 
-    $raw = file_get_contents($file);
-    $config = json_decode($raw ?: '', true);
-
-    if (!is_array($config)) {
-        error_log('AntrianPoli: config_suara.json tidak valid');
-        return ['poli_aktif' => [], 'dokter_aktif' => []];
+    // Override hanya untuk mesin lokal, tanpa mengubah konfigurasi Git.
+    if (is_file($localFile)) {
+        $rawLocal = file_get_contents($localFile);
+        $localConfig = json_decode($rawLocal ?: '', true);
+        if (is_array($localConfig)) {
+            $config = array_replace_recursive($config, $localConfig);
+        }
     }
 
     $poli = isset($config['poli_aktif']) ? $config['poli_aktif'] : (isset($config['poli_suara']) ? $config['poli_suara'] : []);
