@@ -27,10 +27,7 @@ function hari_kerja_indo(): string
     return $map[strtoupper(date('l'))] ?? 'SENIN';
 }
 
-/*
- * File-based call state.
- * Tidak membuat/mengubah tabel apa pun di database SIMRS Khanza.
- */
+/* File-based call state: tidak mengubah struktur database SIMRS Khanza. */
 function call_state_dir(): string
 {
     return dirname(__DIR__) . '/runtime';
@@ -114,6 +111,7 @@ function call_payload(mysqli $db, array $state): ?array
     $row = $result ? mysqli_fetch_assoc($result) : null;
     mysqli_stmt_close($stmt);
     if (!$row) return null;
+
     $row['call_id'] = $state['call_id'];
     $row['call_token'] = $state['call_token'];
     $row['call_state'] = 'playing';
@@ -138,16 +136,33 @@ switch ($action) {
             $now = date('Y-m-d H:i:s');
             $state = call_state_read();
 
-            // Selama TTS/call sebelumnya masih aktif, polling hanya mengembalikan call yang sama.
             if ($state && ($state['status'] ?? '') === 'playing') {
-                $state['last_seen_at'] = $now;
-                call_state_write($state);
-                $db = db();
-                $payload = call_payload($db, $state);
-                if ($payload) {
-                    api_json([$payload]);
+                $lastSeen = strtotime($state['last_seen_at'] ?? $state['started_at'] ?? $now);
+                $stale = $lastSeen !== false && (time() - $lastSeen > 30);
+
+                if (!$stale) {
+                    $state['last_seen_at'] = $now;
+                    call_state_write($state);
+                    $db = db();
+                    $payload = call_payload($db, $state);
+                    if ($payload) {
+                        api_json([$payload]);
+                    }
+                    // State tidak boleh hilang hanya karena data pasien sementara tidak ditemukan.
+                    api_json([]);
                 }
+
+                // Browser/display sudah tidak mengirim heartbeat. Pulihkan call lama agar queue tidak macet.
+                $db = db();
+                $db->begin_transaction();
+                $stmt = mysqli_prepare($db, "UPDATE antripoli SET status='3' WHERE no_rawat=? AND status='2'");
+                if (!$stmt) throw new RuntimeException(mysqli_error($db));
+                mysqli_stmt_bind_param($stmt, 's', $state['no_rawat']);
+                mysqli_stmt_execute($stmt);
+                mysqli_stmt_close($stmt);
+                $db->commit();
                 call_state_clear();
+                $state = null;
             }
 
             $db = $db ?: db();
