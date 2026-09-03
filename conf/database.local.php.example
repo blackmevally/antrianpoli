@@ -1,0 +1,12 @@
+<?php
+/**
+ * Copy this file to database.local.php for local XAMPP development.
+ * DO NOT commit database.local.php if it contains real credentials.
+ */
+return [
+    'host' => '127.0.0.1',
+    'port' => 3306,
+    'user' => 'root',
+    'pass' => '',
+    'name' => 'sik',
+];
