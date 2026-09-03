@@ -11,46 +11,33 @@ Pastikan tabel `antripoli` menggunakan status berikut:
 - `2` = sedang dipanggil
 - `3` = selesai
 
-Jika diperlukan, jalankan:
+Jika diperlukan, jalankan perubahan enum tersebut pada database Khanza yang memang sudah digunakan. Tidak ada tabel tambahan yang diperlukan untuk call queue aplikasi.
 
-```sql
-ALTER TABLE `antripoli`
-CHANGE `status` `status` ENUM('0','1','2','3')
-CHARACTER SET latin1 COLLATE latin1_swedish_ci NULL DEFAULT NULL;
+## Call Queue
+
+Pemanggilan suara menggunakan **file-based atomic queue**, sehingga tidak perlu menambah atau mengubah tabel database SIMRS Khanza.
+
+State sementara aplikasi disimpan di:
+
+```text
+runtime/call_state.json
+runtime/call.lock
 ```
 
-### Call Queue
-
-Mulai Phase 1A.1, pemanggilan suara menggunakan tabel aplikasi `antrianpoli_call_queue` agar dua request `panggil` tidak dapat menimpa panggilan yang masih berjalan.
-
-Jalankan sekali SQL berikut pada database yang sama:
-
-```sql
--- file: database/001_call_queue.sql
-CREATE TABLE IF NOT EXISTS antrianpoli_call_queue (
-    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    no_rawat VARCHAR(17) NOT NULL,
-    call_token CHAR(32) NOT NULL,
-    status ENUM('playing', 'done', 'cancelled') NOT NULL DEFAULT 'playing',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    finished_at DATETIME NULL DEFAULT NULL,
-    last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    UNIQUE KEY uq_call_token (call_token),
-    KEY idx_call_status_created (status, created_at),
-    KEY idx_call_no_rawat (no_rawat)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-```
+Direktori `runtime` dikecualikan dari commit sehingga state runtime tidak masuk Git.
 
 ## Alur pemanggilan
 
-`panggil` sekarang bersifat **idempotent**:
+`panggil` bersifat **idempotent**:
 
-1. Request pertama mengambil nomor `status=1` dan membuat satu `playing` call.
-2. Request berikutnya selama TTS masih berjalan mengembalikan **call yang sama**, bukan nomor berikutnya.
-3. Browser mengirim `ack` setelah TTS selesai.
-4. Baru setelah ACK, `antripoli.status` berubah dari `2` menjadi `3` dan nomor berikutnya dapat dipanggil.
-5. Browser mengirim heartbeat selama call aktif sehingga lock dapat dipantau.
+1. Request pertama mengambil nomor `status=1` dan membuat state `playing` di file aplikasi.
+2. Nomor tersebut diubah menjadi `status=2`.
+3. Request berikutnya selama TTS masih berjalan mengembalikan **call yang sama**, bukan nomor berikutnya.
+4. Browser mengirim heartbeat selama call aktif.
+5. Setelah TTS selesai, browser mengirim `ack`.
+6. Baru setelah ACK, `antripoli.status` berubah dari `2` menjadi `3`.
+7. Setelah itu nomor berikutnya dapat dipanggil.
 
-Dengan demikian skenario A dipanggil lalu request B masuk bersamaan tidak lagi menghasilkan A langsung dianggap selesai dan B menggantikan suara A.
+Jika display mati/crash dan heartbeat berhenti lebih dari 30 detik, state lama dipulihkan agar antrian tidak terkunci selamanya.
+
+Dengan demikian skenario A dipanggil lalu request B masuk bersamaan tidak lagi membuat A langsung dianggap selesai dan digantikan oleh B.
