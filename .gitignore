@@ -1,0 +1,10 @@
+# Local credentials / environment
+conf/database.local.php
+config_suara.local.json
+
+# Runtime state
+runtime/*
+!runtime/.gitignore
+
+# Local logs
+*.log
