@@ -1,0 +1,4 @@
+# Runtime state is created by the application.
+# Do not commit queue state or lock files.
+*
+!.gitignore
