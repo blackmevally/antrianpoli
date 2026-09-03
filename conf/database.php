@@ -4,7 +4,7 @@
  * Credential hanya dari environment variable.
  */
 
-function db(): mysqli
+function db()
 {
     static $connection = null;
 
@@ -29,12 +29,12 @@ function db(): mysqli
     return $connection;
 }
 
-function db_escape(string $value): string
+function db_escape($value)
 {
-    return mysqli_real_escape_string(db(), $value);
+    return mysqli_real_escape_string(db(), (string)$value);
 }
 
-function db_in(array $values): string
+function db_in(array $values)
 {
     $values = array_values(array_filter($values, static function ($value) {
         return is_scalar($value) && (string)$value !== '';
@@ -45,13 +45,13 @@ function db_in(array $values): string
     }
 
     $escaped = array_map(static function ($value) {
-        return "'" . db_escape((string)$value) . "'";
+        return "'" . db_escape($value) . "'";
     }, $values);
 
     return implode(',', $escaped);
 }
 
-function db_query(string $sql): mysqli_result|bool
+function db_query($sql)
 {
     $result = mysqli_query(db(), $sql);
 
@@ -63,9 +63,9 @@ function db_query(string $sql): mysqli_result|bool
     return $result;
 }
 
-function api_error(int $status, string $message): void
+function api_error($status, $message)
 {
-    http_response_code($status);
+    http_response_code((int)$status);
     echo json_encode([
         'status' => 'error',
         'message' => $message
@@ -73,13 +73,13 @@ function api_error(int $status, string $message): void
     exit;
 }
 
-function api_json($data): void
+function api_json($data)
 {
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
-function load_queue_config(): array
+function load_queue_config()
 {
     $file = dirname(__DIR__) . '/config_suara.json';
 
@@ -95,43 +95,11 @@ function load_queue_config(): array
         return ['poli_aktif' => [], 'dokter_aktif' => []];
     }
 
-    $poli = $config['poli_aktif'] ?? $config['poli_suara'] ?? [];
-    $dokter = $config['dokter_aktif'] ?? [];
+    $poli = isset($config['poli_aktif']) ? $config['poli_aktif'] : (isset($config['poli_suara']) ? $config['poli_suara'] : []);
+    $dokter = isset($config['dokter_aktif']) ? $config['dokter_aktif'] : [];
 
     return [
         'poli_aktif' => is_array($poli) ? $poli : [],
         'dokter_aktif' => is_array($dokter) ? $dokter : []
     ];
-}
-
-function queue_filters(): array
-{
-    $config = load_queue_config();
-    $where = [];
-
-    if ($config['poli_aktif']) {
-        $where[] = 'd.kd_poli IN (' . db_in($config['poli_aktif']) . ')';
-    }
-
-    if ($config['dokter_aktif']) {
-        $where[] = 'e.kd_dokter IN (' . db_in($config['dokter_aktif']) . ')';
-    }
-
-    return $where;
-}
-
-function queue_filter_sql(string $aliasPoli = 'd', string $aliasDokter = 'e'): string
-{
-    $config = load_queue_config();
-    $parts = [];
-
-    if ($config['poli_aktif']) {
-        $parts[] = $aliasPoli . '.kd_poli IN (' . db_in($config['poli_aktif']) . ')';
-    }
-
-    if ($config['dokter_aktif']) {
-        $parts[] = $aliasDokter . '.kd_dokter IN (' . db_in($config['dokter_aktif']) . ')';
-    }
-
-    return $parts ? ' AND ' . implode(' AND ', $parts) : '';
 }
