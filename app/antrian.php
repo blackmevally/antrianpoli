@@ -27,20 +27,98 @@ function hari_kerja_indo(): string
     return $map[strtoupper(date('l'))] ?? 'SENIN';
 }
 
-function call_payload(mysqli $db, array $queue): ?array
+/*
+ * File-based call state.
+ * Tidak membuat/mengubah tabel apa pun di database SIMRS Khanza.
+ */
+function call_state_dir(): string
+{
+    return dirname(__DIR__) . '/runtime';
+}
+
+function call_state_file(): string
+{
+    return call_state_dir() . '/call_state.json';
+}
+
+function call_lock_open()
+{
+    $dir = call_state_dir();
+    if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+        throw new RuntimeException('Direktori runtime tidak dapat dibuat');
+    }
+
+    $handle = fopen($dir . '/call.lock', 'c');
+    if (!$handle || !flock($handle, LOCK_EX)) {
+        if ($handle) fclose($handle);
+        throw new RuntimeException('Lock pemanggilan tidak dapat diperoleh');
+    }
+    return $handle;
+}
+
+function call_lock_close($handle): void
+{
+    if (is_resource($handle)) {
+        flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+}
+
+function call_state_read(): ?array
+{
+    $file = call_state_file();
+    if (!is_file($file)) return null;
+
+    $raw = file_get_contents($file);
+    if ($raw === false || trim($raw) === '') return null;
+
+    $state = json_decode($raw, true);
+    return is_array($state) && !empty($state['call_token']) ? $state : null;
+}
+
+function call_state_write(array $state): void
+{
+    $dir = call_state_dir();
+    if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+        throw new RuntimeException('Direktori runtime tidak dapat dibuat');
+    }
+
+    $tmp = $dir . '/call_state.' . bin2hex(random_bytes(6)) . '.tmp';
+    $json = json_encode($state, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    if ($json === false || file_put_contents($tmp, $json, LOCK_EX) === false) {
+        @unlink($tmp);
+        throw new RuntimeException('State pemanggilan tidak dapat disimpan');
+    }
+
+    if (!rename($tmp, call_state_file())) {
+        @unlink($tmp);
+        throw new RuntimeException('State pemanggilan tidak dapat dipindahkan');
+    }
+}
+
+function call_state_clear(): void
+{
+    $file = call_state_file();
+    if (is_file($file) && !unlink($file)) {
+        throw new RuntimeException('State pemanggilan tidak dapat dihapus');
+    }
+}
+
+function call_payload(mysqli $db, array $state): ?array
 {
     $stmt = mysqli_prepare($db, "SELECT a.no_rawat,b.no_reg,c.nm_pasien,d.nm_poli,e.nm_dokter FROM antripoli a INNER JOIN reg_periksa b ON a.no_rawat=b.no_rawat INNER JOIN pasien c ON b.no_rkm_medis=c.no_rkm_medis INNER JOIN poliklinik d ON b.kd_poli=d.kd_poli INNER JOIN dokter e ON b.kd_dokter=e.kd_dokter WHERE a.no_rawat=? LIMIT 1");
     if (!$stmt) throw new RuntimeException(mysqli_error($db));
-    mysqli_stmt_bind_param($stmt, 's', $queue['no_rawat']);
+    mysqli_stmt_bind_param($stmt, 's', $state['no_rawat']);
     mysqli_stmt_execute($stmt);
     $result = mysqli_stmt_get_result($stmt);
     $row = $result ? mysqli_fetch_assoc($result) : null;
     mysqli_stmt_close($stmt);
     if (!$row) return null;
-    $row['call_id'] = (int)$queue['id'];
-    $row['call_token'] = $queue['call_token'];
-    $row['call_state'] = $queue['status'];
-    $row['started_at'] = $queue['started_at'];
+    $row['call_id'] = $state['call_id'];
+    $row['call_token'] = $state['call_token'];
+    $row['call_state'] = 'playing';
+    $row['started_at'] = $state['started_at'];
+    $row['last_seen_at'] = $state['last_seen_at'];
     return $row;
 }
 
@@ -53,36 +131,48 @@ switch ($action) {
         break;
 
     case 'panggil':
-        $db = db();
-        $db->begin_transaction();
+        $lock = null;
+        $db = null;
         try {
-            // Selama masih ada call playing, polling mengembalikan call yang sama.
-            $playingResult = mysqli_query($db, "SELECT id,no_rawat,call_token,status,started_at,last_seen_at FROM antrianpoli_call_queue WHERE status='playing' ORDER BY id ASC LIMIT 1 FOR UPDATE");
-            if ($playingResult === false) throw new RuntimeException(mysqli_error($db));
-            $playing = mysqli_fetch_assoc($playingResult);
-            if ($playing) {
-                $payload = call_payload($db, $playing);
-                $db->commit();
-                api_json($payload ? [$payload] : []);
+            $lock = call_lock_open();
+            $now = date('Y-m-d H:i:s');
+            $state = call_state_read();
+
+            // Selama TTS/call sebelumnya masih aktif, polling hanya mengembalikan call yang sama.
+            if ($state && ($state['status'] ?? '') === 'playing') {
+                $state['last_seen_at'] = $now;
+                call_state_write($state);
+                $db = db();
+                $payload = call_payload($db, $state);
+                if ($payload) {
+                    api_json([$payload]);
+                }
+                call_state_clear();
             }
+
+            $db = $db ?: db();
+            $db->begin_transaction();
 
             $sql = "SELECT a.no_rawat,b.no_reg,c.nm_pasien,d.nm_poli,e.nm_dokter FROM antripoli a INNER JOIN reg_periksa b ON a.no_rawat=b.no_rawat INNER JOIN pasien c ON b.no_rkm_medis=c.no_rkm_medis INNER JOIN poliklinik d ON b.kd_poli=d.kd_poli INNER JOIN dokter e ON b.kd_dokter=e.kd_dokter WHERE a.status='1' " . display_filter_sql() . " ORDER BY a.no_rawat ASC LIMIT 1 FOR UPDATE";
             $result = mysqli_query($db, $sql);
             if ($result === false) throw new RuntimeException(mysqli_error($db));
             $row = mysqli_fetch_assoc($result);
+
             if (!$row) {
                 $db->commit();
                 api_json([]);
             }
 
             $token = bin2hex(random_bytes(16));
-            $stmt = mysqli_prepare($db, "INSERT INTO antrianpoli_call_queue (no_rawat,call_token,status,created_at,started_at,last_seen_at) VALUES (?,?,'playing',NOW(),NOW(),NOW())");
-            if (!$stmt) throw new RuntimeException(mysqli_error($db));
-            mysqli_stmt_bind_param($stmt, 'ss', $row['no_rawat'], $token);
-            mysqli_stmt_execute($stmt);
-            $queueId = mysqli_insert_id($db);
-            mysqli_stmt_close($stmt);
-            if ($queueId <= 0) throw new RuntimeException('Call queue gagal dibuat');
+            $callId = date('YmdHis') . '-' . bin2hex(random_bytes(4));
+            $state = [
+                'call_id' => $callId,
+                'call_token' => $token,
+                'no_rawat' => $row['no_rawat'],
+                'status' => 'playing',
+                'started_at' => $now,
+                'last_seen_at' => $now
+            ];
 
             $stmt = mysqli_prepare($db, "UPDATE antripoli SET status='2' WHERE no_rawat=? AND status='1'");
             if (!$stmt) throw new RuntimeException(mysqli_error($db));
@@ -92,66 +182,74 @@ switch ($action) {
             mysqli_stmt_close($stmt);
             if ($affected !== 1) throw new RuntimeException('Nomor antrian gagal di-claim');
 
+            call_state_write($state);
             $db->commit();
-            $row['call_id'] = $queueId;
+
+            $row['call_id'] = $callId;
             $row['call_token'] = $token;
             $row['call_state'] = 'playing';
-            $row['started_at'] = date('Y-m-d H:i:s');
+            $row['started_at'] = $now;
+            $row['last_seen_at'] = $now;
             api_json([$row]);
         } catch (Throwable $e) {
-            $db->rollback();
+            if ($db instanceof mysqli) {
+                try { $db->rollback(); } catch (Throwable $ignored) {}
+            }
             error_log('AntrianPoli panggil error: ' . $e->getMessage());
             api_error(500, 'Gagal memproses pemanggilan antrian');
+        } finally {
+            call_lock_close($lock);
         }
         break;
 
     case 'heartbeat':
         $token = trim((string)($_GET['call_token'] ?? $_POST['call_token'] ?? ''));
         if ($token === '' || !preg_match('/^[a-f0-9]{32}$/', $token)) api_error(400, 'call_token tidak valid');
-        $db = db();
-        $stmt = mysqli_prepare($db, "UPDATE antrianpoli_call_queue SET last_seen_at=NOW() WHERE call_token=? AND status='playing'");
-        if (!$stmt) api_error(500, 'Gagal memperbarui heartbeat');
-        mysqli_stmt_bind_param($stmt, 's', $token);
-        mysqli_stmt_execute($stmt);
-        $ok = mysqli_stmt_affected_rows($stmt) >= 1;
-        mysqli_stmt_close($stmt);
-        api_json(['ok'=>$ok]);
+
+        $lock = call_lock_open();
+        try {
+            $state = call_state_read();
+            if (!$state || ($state['call_token'] ?? '') !== $token || ($state['status'] ?? '') !== 'playing') {
+                api_json(['ok'=>false]);
+            }
+            $state['last_seen_at'] = date('Y-m-d H:i:s');
+            call_state_write($state);
+            api_json(['ok'=>true]);
+        } finally {
+            call_lock_close($lock);
+        }
         break;
 
     case 'ack':
         $token = trim((string)($_GET['call_token'] ?? $_POST['call_token'] ?? ''));
         if ($token === '' || !preg_match('/^[a-f0-9]{32}$/', $token)) api_error(400, 'call_token tidak valid');
-        $db = db();
-        $db->begin_transaction();
+
+        $lock = call_lock_open();
+        $db = null;
         try {
-            $stmt = mysqli_prepare($db, "SELECT id,no_rawat,status FROM antrianpoli_call_queue WHERE call_token=? LIMIT 1 FOR UPDATE");
-            if (!$stmt) throw new RuntimeException(mysqli_error($db));
-            mysqli_stmt_bind_param($stmt, 's', $token);
-            mysqli_stmt_execute($stmt);
-            $result = mysqli_stmt_get_result($stmt);
-            $queue = $result ? mysqli_fetch_assoc($result) : null;
-            mysqli_stmt_close($stmt);
-            if (!$queue) throw new RuntimeException('Call tidak ditemukan');
-
-            if ($queue['status'] === 'playing') {
-                $stmt = mysqli_prepare($db, "UPDATE antrianpoli_call_queue SET status='done',finished_at=NOW(),last_seen_at=NOW() WHERE id=? AND status='playing'");
-                if (!$stmt) throw new RuntimeException(mysqli_error($db));
-                mysqli_stmt_bind_param($stmt, 'i', $queue['id']);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_close($stmt);
-
-                $stmt = mysqli_prepare($db, "UPDATE antripoli SET status='3' WHERE no_rawat=? AND status='2'");
-                if (!$stmt) throw new RuntimeException(mysqli_error($db));
-                mysqli_stmt_bind_param($stmt, 's', $queue['no_rawat']);
-                mysqli_stmt_execute($stmt);
-                mysqli_stmt_close($stmt);
+            $state = call_state_read();
+            if (!$state || ($state['call_token'] ?? '') !== $token) {
+                api_json(['ok'=>true,'status'=>'done']);
             }
+
+            $db = db();
+            $db->begin_transaction();
+            $stmt = mysqli_prepare($db, "UPDATE antripoli SET status='3' WHERE no_rawat=? AND status='2'");
+            if (!$stmt) throw new RuntimeException(mysqli_error($db));
+            mysqli_stmt_bind_param($stmt, 's', $state['no_rawat']);
+            mysqli_stmt_execute($stmt);
+            mysqli_stmt_close($stmt);
             $db->commit();
-            api_json(['ok'=>true,'call_id'=>(int)$queue['id'],'status'=>'done']);
+            call_state_clear();
+            api_json(['ok'=>true,'call_id'=>$state['call_id'],'status'=>'done']);
         } catch (Throwable $e) {
-            $db->rollback();
+            if ($db instanceof mysqli) {
+                try { $db->rollback(); } catch (Throwable $ignored) {}
+            }
             error_log('AntrianPoli ack error: ' . $e->getMessage());
             api_error(500, 'Gagal menyelesaikan pemanggilan antrian');
+        } finally {
+            call_lock_close($lock);
         }
         break;
 
