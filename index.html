@@ -1,0 +1,162 @@
+<?php include("config/db.php"); ?>
+<!DOCTYPE html>
+<html lang="id" class="light-style layout-menu-fixed" dir="ltr" data-theme="theme-default" data-assets-path="assets/">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Display Antrian</title>
+  <link rel="icon" href="assets/img/favicon.ico">
+
+  <!-- Fonts & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap">
+  <script src="assets/vendor/js/jquery.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="assets/responsivevoice.js?key=WfWmvaX0"></script>
+
+  <!-- Style -->
+  <style>
+    :root {
+      --green: #28a745;
+      --blue: #007bff;
+      --yellow: #ffc107;
+      --red: #dc3545;
+      --white: #ffffff;
+      --gradient: linear-gradient(135deg, var(--blue), var(--green));
+    }
+    body {
+      font-family: 'Poppins', sans-serif;
+      background: var(--gradient);
+      color: var(--white);
+      margin: 0;
+      overflow-x: hidden;
+    }
+    nav {
+      background: var(--blue);
+      padding: 0.8rem 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+    nav h2 { margin: 0; font-weight: 700; color: var(--white); }
+    #clock { font-weight: 600; font-size: 1.4rem; color: var(--yellow); }
+
+    .main-container {
+      display: grid;
+      grid-template-columns: 45% 55%;
+      gap: 1rem;
+      padding: 1rem;
+    }
+    .card {
+      background: rgba(255, 255, 255, 0.12);
+      backdrop-filter: blur(10px);
+      border-radius: 15px;
+      padding: 1rem;
+      box-shadow: 0 0 15px rgba(0,0,0,0.2);
+      transition: all 0.3s ease;
+    }
+    .card:hover {
+      transform: scale(1.02);
+      box-shadow: 0 0 20px rgba(255,255,255,0.2);
+    }
+
+    #nomor h1 {
+      font-size: 5rem;
+      color: var(--yellow);
+      margin: 0;
+    }
+    #nomor h2 {
+      font-size: 1.8rem;
+      color: var(--white);
+    }
+    #nomor b { color: var(--green); }
+
+    video {
+      width: 100%;
+      border-radius: 15px;
+      box-shadow: 0 0 20px rgba(0,0,0,0.3);
+    }
+
+    /* Scroll poli 1 baris */
+    #datapoli {
+      display: flex;
+      overflow-x: auto;
+      gap: 1rem;
+      padding: 1rem;
+      scroll-behavior: smooth;
+    }
+    #datapoli::-webkit-scrollbar {
+      height: 8px;
+    }
+    #datapoli::-webkit-scrollbar-thumb {
+      background: var(--yellow);
+      border-radius: 10px;
+    }
+
+    .poli-card {
+      min-width: 240px;
+      flex-shrink: 0;
+      background: rgba(255,255,255,0.15);
+      border: 2px solid var(--green);
+      border-radius: 12px;
+      text-align: center;
+      padding: 0.8rem;
+    }
+    .poli-card h5 {
+      color: var(--white);
+      font-weight: 600;
+      margin-bottom: 0.3rem;
+    }
+    .poli-card h2 {
+      color: var(--yellow);
+      margin: 0;
+    }
+    .poli-card h6 {
+      color: var(--white);
+      font-size: 0.9rem;
+    }
+
+    footer {
+      background: var(--red);
+      padding: 0.5rem;
+      text-align: center;
+      color: var(--white);
+      font-weight: 600;
+    }
+    marquee {
+      font-size: 1.2rem;
+      color: var(--white);
+    }
+  </style>
+</head>
+
+<body>
+  <nav>
+    <h2 id="namars">RSUD Modern</h2>
+    <div id="clock">--:--:--</div>
+  </nav>
+
+  <div class="main-container">
+    <div class="card text-center">
+      <h3 style="color:var(--yellow)">ANTRIAN POLI</h3>
+      <div id="nomor"></div>
+    </div>
+
+    <div class="card">
+      <video id="tvStream" autoplay muted playsinline></video>
+    </div>
+  </div>
+
+  <div id="datapoli"></div>
+
+  <footer>
+    <marquee id="text">Selamat Datang di Sistem Antrian Digital</marquee>
+  </footer>
+
+  <audio id="myAudio" src="assets/notif.mp3"></audio>
+
+  <script src="app/antrian.js"></script>
+  <script src="assets/vendor/js/theme.js"></script>
+</body>
+</html>
