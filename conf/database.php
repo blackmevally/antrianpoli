@@ -1,7 +1,11 @@
 <?php
 /**
- * Database foundation untuk endpoint/API baru.
- * Credential hanya dari environment variable.
+ * Database foundation untuk endpoint/API.
+ *
+ * Urutan konfigurasi:
+ * 1. conf/database.local.php (khusus localhost, tidak di-commit)
+ * 2. Environment variable DB_HOST/DB_USER/DB_PASS/DB_NAME
+ * 3. Default XAMPP: 127.0.0.1 / root / kosong / sik
  */
 
 function db()
@@ -12,13 +16,20 @@ function db()
         return $connection;
     }
 
-    $host = getenv('DB_HOST') ?: '127.0.0.1';
-    $user = getenv('DB_USER') ?: 'root';
-    $pass = getenv('DB_PASS') ?: '';
-    $name = getenv('DB_NAME') ?: 'sik';
+    $localConfig = __DIR__ . '/database.local.php';
+    $config = is_file($localConfig) ? require $localConfig : [];
+    if (!is_array($config)) {
+        $config = [];
+    }
+
+    $host = $config['host'] ?? (getenv('DB_HOST') ?: '127.0.0.1');
+    $user = $config['user'] ?? (getenv('DB_USER') ?: 'root');
+    $pass = $config['pass'] ?? (getenv('DB_PASS') ?: '');
+    $name = $config['name'] ?? (getenv('DB_NAME') ?: 'sik');
+    $port = (int)($config['port'] ?? (getenv('DB_PORT') ?: 3306));
 
     mysqli_report(MYSQLI_REPORT_OFF);
-    $connection = mysqli_connect($host, $user, $pass, $name);
+    $connection = mysqli_connect($host, $user, $pass, $name, $port);
 
     if (!$connection) {
         error_log('AntrianPoli DB connection failed: ' . mysqli_connect_error());
