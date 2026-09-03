@@ -1,33 +1,54 @@
 <?php
-require_once('../conf/conf.php');
+require_once __DIR__ . '/../conf/database.php';
+
 date_default_timezone_set('Asia/Jakarta');
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
 
-// =============================================================
-// FILTER DISPLAY
-// =============================================================
-$poli_filter   = "'U0006','U0131','UK108','U0021','U0178','U0107','U0003','U1025','U0075'";
-$dokter_filter = "'8201232007405K','D0000093','911121191125','89061223080001','690923180912','870413180101','8007262001385K','D0000013','790316180912','002010002','D0000086','920108010925','910212090925','8403292211032'";
+$action = $_GET['p'] ?? '';
 
-$jamreset = '23:00:00';
-
-if (!isset($_GET['p'])) {
-    echo json_encode(["status" => "error", "message" => "Parameter tidak ditemukan"]);
-    exit;
+if ($action === '') {
+    api_error(400, 'Parameter p tidak ditemukan');
 }
 
-// =============================================================
-// HELPER: escape nilai SQL sederhana
-// =============================================================
-function sql_escape($value) {
-    return addslashes((string)$value);
+/**
+ * Filter yang berasal dari config_suara.json.
+ * Jika filter kosong, endpoint tidak membatasi poli/dokter.
+ */
+function display_filter_sql(string $poliAlias = 'd', string $dokterAlias = 'e'): string
+{
+    $config = load_queue_config();
+    $parts = [];
+
+    if (!empty($config['poli_aktif'])) {
+        $parts[] = $poliAlias . '.kd_poli IN (' . db_in($config['poli_aktif']) . ')';
+    }
+
+    if (!empty($config['dokter_aktif'])) {
+        $parts[] = $dokterAlias . '.kd_dokter IN (' . db_in($config['dokter_aktif']) . ')';
+    }
+
+    return $parts ? ' AND ' . implode(' AND ', $parts) : '';
 }
 
-switch ($_GET['p']) {
+function hari_kerja_indo(): string
+{
+    $map = [
+        'SUNDAY' => 'AKHAD',
+        'MONDAY' => 'SENIN',
+        'TUESDAY' => 'SELASA',
+        'WEDNESDAY' => 'RABU',
+        'THURSDAY' => 'KAMIS',
+        'FRIDAY' => 'JUMAT',
+        'SATURDAY' => 'SABTU'
+    ];
 
-    // =========================================================
-    // NOMOR ANTRIAN AKTIF
-    // =========================================================
+    return $map[strtoupper(date('l'))] ?? 'SENIN';
+}
+
+switch ($action) {
+
     case 'nomor':
         $sql = "
             SELECT
@@ -43,87 +64,118 @@ switch ($_GET['p']) {
             INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
             INNER JOIN poliklinik d ON b.kd_poli = d.kd_poli
             INNER JOIN dokter e ON b.kd_dokter = e.kd_dokter
-            WHERE d.kd_poli IN ($poli_filter)
-            " . (!empty($dokter_filter) ? "AND e.kd_dokter IN ($dokter_filter)" : "") . "
-            AND a.status IN ('1','2')
+            WHERE a.status IN ('1','2')
+            " . display_filter_sql() . "
             ORDER BY a.no_rawat ASC
             LIMIT 1
         ";
 
-        $hasil = bukaquery($sql);
+        $result = db_query($sql);
+        $data = mysqli_fetch_assoc($result);
 
-        if (mysqli_num_rows($hasil) > 0) {
-            $data = mysqli_fetch_assoc($hasil);
-        } else {
-            $data = [
-                "no_reg"    => "000",
-                "nm_pasien" => "-",
-                "nm_poli"   => "-",
-                "nm_dokter" => "-",
-                "status"    => "0"
-            ];
-        }
-
-        echo json_encode($data);
+        api_json($data ?: [
+            'no_reg' => '000',
+            'nm_pasien' => '-',
+            'nm_poli' => '-',
+            'nm_dokter' => '-',
+            'status' => '0'
+        ]);
         break;
 
-    // =========================================================
-    // PEMANGGILAN SUARA
-    // =========================================================
     case 'panggil':
-        $sql = "
-            SELECT
-                a.no_rawat,
-                b.no_reg,
-                c.nm_pasien,
-                d.nm_poli,
-                e.nm_dokter
-            FROM antripoli a
-            INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
-            INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
-            INNER JOIN poliklinik d ON b.kd_poli = d.kd_poli
-            INNER JOIN dokter e ON b.kd_dokter = e.kd_dokter
-            WHERE a.status='1'
-            AND d.kd_poli IN ($poli_filter)
-            " . (!empty($dokter_filter) ? "AND e.kd_dokter IN ($dokter_filter)" : "") . "
-            ORDER BY a.no_rawat ASC
-            LIMIT 1
-        ";
+        /**
+         * Claim atomik:
+         * - satu koneksi
+         * - transaction + row lock
+         * - ambil satu status=1
+         * - selesaikan status=2 sebelumnya
+         * - ubah item terpilih menjadi status=2
+         *
+         * Ini mencegah dua request display mengambil nomor yang sama
+         * secara bersamaan.
+         */
+        $db = db();
+        $db->begin_transaction();
 
-        $hasil = bukaquery($sql);
-        $data = [];
+        try {
+            $sql = "
+                SELECT
+                    a.no_rawat,
+                    b.no_reg,
+                    c.nm_pasien,
+                    d.nm_poli,
+                    e.nm_dokter
+                FROM antripoli a
+                INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
+                INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
+                INNER JOIN poliklinik d ON b.kd_poli = d.kd_poli
+                INNER JOIN dokter e ON b.kd_dokter = e.kd_dokter
+                WHERE a.status = '1'
+                " . display_filter_sql() . "
+                ORDER BY a.no_rawat ASC
+                LIMIT 1
+                FOR UPDATE
+            ";
 
-        if (mysqli_num_rows($hasil) > 0) {
-            $r = mysqli_fetch_assoc($hasil);
-            $data[] = $r;
+            $result = mysqli_query($db, $sql);
 
-            bukaquery2("UPDATE antripoli SET status='3' WHERE status='2'");
-            bukaquery2("UPDATE antripoli SET status='2' WHERE no_rawat='" . sql_escape($r['no_rawat']) . "'");
+            if ($result === false) {
+                throw new RuntimeException(mysqli_error($db));
+            }
+
+            $row = mysqli_fetch_assoc($result);
+
+            if (!$row) {
+                $db->commit();
+                api_json([]);
+            }
+
+            // Pertahankan perilaku lama: nomor yang sedang status=2
+            // dianggap selesai ketika nomor baru dipanggil.
+            $finish = mysqli_query(
+                $db,
+                "UPDATE antripoli SET status='3' WHERE status='2'"
+            );
+
+            if ($finish === false) {
+                throw new RuntimeException(mysqli_error($db));
+            }
+
+            $stmt = mysqli_prepare(
+                $db,
+                "UPDATE antripoli SET status='2' WHERE no_rawat=? AND status='1'"
+            );
+
+            if (!$stmt) {
+                throw new RuntimeException(mysqli_error($db));
+            }
+
+            mysqli_stmt_bind_param($stmt, 's', $row['no_rawat']);
+            mysqli_stmt_execute($stmt);
+            $affected = mysqli_stmt_affected_rows($stmt);
+            mysqli_stmt_close($stmt);
+
+            if ($affected !== 1) {
+                throw new RuntimeException('Nomor antrian gagal di-claim');
+            }
+
+            $db->commit();
+            api_json([$row]);
+
+        } catch (Throwable $e) {
+            $db->rollback();
+            error_log('AntrianPoli panggil error: ' . $e->getMessage());
+            api_error(500, 'Gagal memproses pemanggilan antrian');
         }
-
-        echo json_encode($data);
         break;
 
-    // =========================================================
-    // DAFTAR POLI + DOKTER HARI INI
-    // SATU KOMBINASI kd_poli + kd_dokter = SATU CARD
-    // =========================================================
     case 'poli':
-        $hari = strtoupper(date('l'));
-
-        $map = [
-            "SUNDAY"    => "AKHAD",
-            "MONDAY"    => "SENIN",
-            "TUESDAY"   => "SELASA",
-            "WEDNESDAY" => "RABU",
-            "THURSDAY"  => "KAMIS",
-            "FRIDAY"    => "JUMAT",
-            "SATURDAY"  => "SABTU"
-        ];
-
-        $hariindo = $map[$hari] ?? "SENIN";
+        $hariindo = hari_kerja_indo();
         $jamSekarang = date('H:i:s');
 
+        $hariSql = db_escape($hariindo);
+
+        // Alias e/d tetap digunakan agar filter config dapat dipakai.
         $sql = "
             SELECT
                 j.kd_poli,
@@ -135,126 +187,91 @@ switch ($_GET['p']) {
             FROM jadwal j
             INNER JOIN poliklinik p ON j.kd_poli = p.kd_poli
             INNER JOIN dokter d ON j.kd_dokter = d.kd_dokter
-            WHERE j.hari_kerja = '$hariindo'
-            AND j.kd_poli IN ($poli_filter)
-            " . (!empty($dokter_filter) ? "AND j.kd_dokter IN ($dokter_filter)" : "") . "
+            WHERE j.hari_kerja = '{$hariSql}'
+            " . display_filter_sql('p', 'd') . "
             ORDER BY j.jam_mulai ASC, j.kd_poli ASC, j.kd_dokter ASC
         ";
 
-        $hasil = bukaquery($sql);
+        $result = db_query($sql);
         $data = [];
-
-        if (mysqli_num_rows($hasil) == 0) {
-            echo json_encode([]);
-            break;
-        }
-
-        // Dedup API:
-        // kombinasi poli + dokter hanya dikirim satu kali.
         $seen = [];
 
-        while ($r = mysqli_fetch_assoc($hasil)) {
+        while ($row = mysqli_fetch_assoc($result)) {
+            $key = $row['kd_poli'] . '|' . $row['kd_dokter'];
 
-            $uniqueKey = $r['kd_poli'] . '|' . $r['kd_dokter'];
-
-            if (isset($seen[$uniqueKey])) {
+            if (isset($seen[$key])) {
                 continue;
             }
 
-            $seen[$uniqueKey] = true;
-
-            $jamMulai   = $r['jam_mulai'];
-            $jamSelesai = $r['jam_selesai'];
-            $jamSekarang = date('H:i:s');
+            $seen[$key] = true;
+            $jamMulai = $row['jam_mulai'];
+            $jamSelesai = $row['jam_selesai'];
 
             $aktif = (
                 $jamSekarang >= $jamMulai &&
-                ($jamSelesai == null || $jamSekarang <= $jamSelesai)
+                ($jamSelesai === null || $jamSekarang <= $jamSelesai)
             );
 
-            $belumMulai = ($jamSekarang < $jamMulai);
+            $belumMulai = $jamSekarang < $jamMulai;
             $sudahSelesai = (
-                $jamSelesai != null &&
+                $jamSelesai !== null &&
                 $jamSekarang > $jamSelesai
             );
 
             if ($aktif) {
+                $kdPoli = db_escape((string)$row['kd_poli']);
+                $kdDokter = db_escape((string)$row['kd_dokter']);
 
-                $sqlAntri = "
-                    SELECT
-                        b.no_reg,
-                        c.nm_pasien
+                $queueSql = "
+                    SELECT b.no_reg, c.nm_pasien
                     FROM antripoli a
                     INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
                     INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
                     WHERE a.status IN ('1','2','3')
-                    AND b.kd_poli = '" . sql_escape($r['kd_poli']) . "'
-                    AND b.kd_dokter = '" . sql_escape($r['kd_dokter']) . "'
+                    AND b.kd_poli = '{$kdPoli}'
+                    AND b.kd_dokter = '{$kdDokter}'
                     ORDER BY a.no_rawat DESC
                     LIMIT 1
                 ";
 
-                $antri = bukaquery($sqlAntri);
+                $queue = db_query($queueSql);
+                $patient = mysqli_fetch_assoc($queue);
 
-                if (mysqli_num_rows($antri) > 0) {
-                    $p = mysqli_fetch_assoc($antri);
-
-                    $pasienData = [[
-                        "no_reg"    => $p["no_reg"],
-                        "nm_pasien" => $p["nm_pasien"]
-                    ]];
-                } else {
-                    $pasienData = [[
-                        "no_reg"    => "000",
-                        "nm_pasien" => "Belum ada antrian"
-                    ]];
+                $pasienData = [[
+                    'no_reg' => $patient['no_reg'] ?? '000',
+                    'nm_pasien' => $patient['nm_pasien'] ?? 'Belum ada antrian'
+                ]];
+            } elseif ($belumMulai || $sudahSelesai) {
+                $jamText = date('H:i', strtotime($jamMulai));
+                if ($jamSelesai) {
+                    $jamText .= ' - ' . date('H:i', strtotime($jamSelesai));
                 }
 
-            } elseif ($belumMulai) {
-
-                $jamText = date("H:i", strtotime($jamMulai)) .
-                    ($jamSelesai ? " - " . date("H:i", strtotime($jamSelesai)) : "");
-
                 $pasienData = [[
-                    "no_reg"    => $jamText,
-                    "nm_pasien" => "Belum mulai"
+                    'no_reg' => $jamText,
+                    'nm_pasien' => $belumMulai ? 'Belum mulai' : 'Selesai'
                 ]];
-
-            } elseif ($sudahSelesai) {
-
-                $jamText = date("H:i", strtotime($jamMulai)) .
-                    ($jamSelesai ? " - " . date("H:i", strtotime($jamSelesai)) : "");
-
-                $pasienData = [[
-                    "no_reg"    => $jamText,
-                    "nm_pasien" => "Selesai"
-                ]];
-
             } else {
                 $pasienData = [[
-                    "no_reg"    => "000",
-                    "nm_pasien" => "Belum ada antrian"
+                    'no_reg' => '000',
+                    'nm_pasien' => 'Belum ada antrian'
                 ]];
             }
 
             $data[] = [
-                "kd_poli"    => $r["kd_poli"],
-                "nm_poli"    => $r["nm_poli"],
-                "kd_dokter"  => $r["kd_dokter"],
-                "nm_dokter"  => $r["nm_dokter"],
-                "jam_mulai"  => $r["jam_mulai"],
-                "jam_selesai" => $r["jam_selesai"],
-                "data_pasien" => $pasienData
+                'kd_poli' => $row['kd_poli'],
+                'nm_poli' => $row['nm_poli'],
+                'kd_dokter' => $row['kd_dokter'],
+                'nm_dokter' => $row['nm_dokter'],
+                'jam_mulai' => $row['jam_mulai'],
+                'jam_selesai' => $row['jam_selesai'],
+                'data_pasien' => $pasienData
             ];
         }
 
-        echo json_encode($data);
+        api_json($data);
         break;
 
     default:
-        echo json_encode([
-            "status" => "error",
-            "message" => "Parameter tidak valid"
-        ]);
+        api_error(400, 'Parameter tidak valid');
 }
-?>
