@@ -14,11 +14,9 @@ function pengaturan() {
 }
 
 function tampilAntrian() {
-  // ==== NOMOR ANTRIAN UTAMA ====
   $.getJSON("app/antrian.php?p=nomor", function (data) {
     const nomor = $("#nomor");
     nomor.empty();
-
     if (data && data.no_reg !== "000") {
       nomor.html(`
         <h2>${data.nm_pasien}</h2>
@@ -30,11 +28,9 @@ function tampilAntrian() {
     }
   }).fail(xhr => console.error("Gagal ambil nomor:", xhr.statusText));
 
-  // ==== DAFTAR POLI ====
   $.getJSON("app/antrian.php?p=poli", function (data) {
     const wrapper = $("#datapoli");
     wrapper.empty();
-
     if (!data || data.length === 0) {
       wrapper.html("<div class='poli-card'><h5>Tidak ada data poli aktif</h5></div>");
       return;
@@ -90,15 +86,13 @@ function startStream() {
   }, { once: true });
 }
 
-$(document).ready(function () {
-  pengaturan();
-  tampilAntrian();
-  startStream();
-  updateClock();
-
-  /* =======================
-   antrian.js (fix TTS natural)
+/* =======================
+   TTS + CALL QUEUE
    ======================= */
+let callPlaying = false;
+let activeCallToken = null;
+let heartbeatTimer = null;
+let lastCallToken = sessionStorage.getItem("antrianpoli_last_call_token") || null;
 
 function normalisasiGelar(teks) {
   if (!teks) return "";
@@ -135,36 +129,123 @@ function angkaTerbilang(n) {
   return n.toString();
 }
 
-/* === Fungsi utama pemanggil suara === */
-function panggilSuara() {
-  $.getJSON("app/antrian.php?p=panggil", data => {
-    if (!data || data.length === 0) return;
-    const notif = $("#notif")[0];
-    data.forEach(i => {
-      const angka = parseInt(i.no_reg, 10);
-      const teksNomor = angkaTerbilang(angka);
-      const nama = normalisasiGelar(i.nm_pasien);
-      const dokter = normalisasiGelar(i.nm_dokter);
-      const teks = `Nomor antrian ${teksNomor}, atas nama ${nama}, silakan menuju ${i.nm_poli}, ${dokter}.`;
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
 
-      notif.currentTime = 0;
-      notif.play().then(() => {
-        responsiveVoice.speak(teks, "Indonesian Female", {
-          rate: 1,
-          pitch: 1,
-          volume: 1
-        });
-      });
-    });
+function startHeartbeat(token) {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (!token) return;
+    $.ajax({
+      url: "app/antrian.php?p=heartbeat",
+      type: "POST",
+      data: { call_token: token },
+      dataType: "json"
+    }).fail(xhr => console.warn("Heartbeat call gagal:", xhr.statusText));
+  }, 5000);
+}
+
+function ackCall(token) {
+  if (!token) return;
+  stopHeartbeat();
+
+  $.ajax({
+    url: "app/antrian.php?p=ack",
+    type: "POST",
+    data: { call_token: token },
+    dataType: "json"
+  }).done(() => {
+    if (activeCallToken === token) {
+      activeCallToken = null;
+      callPlaying = false;
+    }
+  }).fail(xhr => {
+    console.error("ACK pemanggilan gagal:", xhr.statusText);
+    // Tetap lepaskan lock browser agar polling dapat mencoba lagi.
+    // Server tetap menjaga call sebagai playing sampai ACK berhasil.
+    if (activeCallToken === token) {
+      activeCallToken = null;
+      callPlaying = false;
+    }
   });
 }
 
-/* Interval panggilan */
-setInterval(panggilSuara, 3000);
+function panggilSuara() {
+  // Jangan pernah meminta nomor berikutnya ketika TTS lokal masih berjalan.
+  if (callPlaying) return;
 
-  
-  // Interval
+  $.getJSON("app/antrian.php?p=panggil", function (data) {
+    if (!data || data.length === 0) return;
+
+    const item = data[0];
+    const token = item.call_token;
+    if (!token) {
+      console.error("Respons panggilan tidak memiliki call_token");
+      return;
+    }
+
+    // Polling 3 detik akan mendapatkan call playing yang sama.
+    // Jangan memutar ulang call yang sudah diproses oleh tab ini.
+    if (token === lastCallToken) return;
+    if (callPlaying) return;
+
+    callPlaying = true;
+    activeCallToken = token;
+    lastCallToken = token;
+    sessionStorage.setItem("antrianpoli_last_call_token", token);
+    startHeartbeat(token);
+
+    const notif = $("#notif")[0];
+    const angka = parseInt(item.no_reg, 10);
+    const teksNomor = angkaTerbilang(angka);
+    const nama = normalisasiGelar(item.nm_pasien);
+    const dokter = normalisasiGelar(item.nm_dokter);
+    const teks = `Nomor antrian ${teksNomor}, atas nama ${nama}, silakan menuju ${item.nm_poli}, ${dokter}.`;
+
+    const selesai = function () {
+      ackCall(token);
+    };
+
+    const mulaiTTS = function () {
+      try {
+        responsiveVoice.speak(teks, "Indonesian Female", {
+          rate: 1,
+          pitch: 1,
+          volume: 1,
+          onend: selesai,
+          onerror: selesai
+        });
+      } catch (e) {
+        console.error("TTS error:", e);
+        selesai();
+      }
+    };
+
+    if (notif && typeof notif.play === "function") {
+      notif.currentTime = 0;
+      const playPromise = notif.play();
+      if (playPromise && typeof playPromise.then === "function") {
+        playPromise.then(mulaiTTS).catch(() => mulaiTTS());
+      } else {
+        mulaiTTS();
+      }
+    } else {
+      mulaiTTS();
+    }
+  }).fail(xhr => console.error("Gagal mengambil panggilan:", xhr.statusText));
+}
+
+$(document).ready(function () {
+  pengaturan();
+  tampilAntrian();
+  startStream();
+  updateClock();
+
+  setInterval(panggilSuara, 3000);
   setInterval(updateClock, 1000);
   setInterval(tampilAntrian, 3000);
-  
 });
