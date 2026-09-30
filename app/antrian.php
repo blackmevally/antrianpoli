@@ -244,21 +244,88 @@ switch ($_GET['p']) {
             $sudahSelesai = ($jamSelesai != null && $jamSekarang > $jamSelesai);
 
             if ($aktif) {
+                // Card bawah harus merepresentasikan PASIEN TERAKHIR DIPANGGIL,
+                // bukan pasien dengan no_rawat terbesar.
+                // Prioritas:
+                // 1) history panggilan hari ini (paling akurat, berdasarkan called_at)
+                // 2) status=2 (sedang dipanggil) sebagai fallback jika history belum tersedia
+                // 3) status=3 sebagai fallback legacy.
+                $pasienData = [];
+                // Values originate from the trusted jadwal query above.
+                $kdPoli = $r['kd_poli'];
+                $kdDokter = $r['kd_dokter'];
+
                 $sqlAntri = "
-                    SELECT 
-                        b.no_reg,
+                    SELECT
+                        h.no_reg,
                         c.nm_pasien
-                    FROM antripoli a
-                    INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
-                    INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
-                    WHERE a.status IN ('1','2','3')
-                    AND b.kd_poli = '{$r['kd_poli']}'
-                    AND b.kd_dokter = '{$r['kd_dokter']}'
-                    ORDER BY a.no_rawat DESC
+                    FROM portal_queue_call_history h
+                    INNER JOIN pasien c ON h.no_rawat = c.no_rkm_medis
+                    WHERE 1=0
                     LIMIT 1
                 ";
-                $antri = bukaquery($sqlAntri);
-                $pasienData = [];
+
+                // Gunakan history jika tabel tersedia.
+                $dbCheck = bukakoneksi();
+                $historyAvailable = false;
+                $tableCheck = mysqli_query(
+                    $dbCheck,
+                    "SELECT 1 FROM information_schema.tables
+                     WHERE table_schema = DATABASE()
+                       AND table_name = 'portal_queue_call_history'
+                     LIMIT 1"
+                );
+                if ($tableCheck && mysqli_num_rows($tableCheck) > 0) {
+                    $historyAvailable = true;
+                }
+                mysqli_close($dbCheck);
+
+                if ($historyAvailable) {
+                    $sqlAntri = "
+                        SELECT
+                            h.no_reg,
+                            c.nm_pasien
+                        FROM portal_queue_call_history h
+                        INNER JOIN reg_periksa b
+                            ON h.no_rawat = b.no_rawat
+                        INNER JOIN pasien c
+                            ON b.no_rkm_medis = c.no_rkm_medis
+                        WHERE h.tgl_registrasi = CURDATE()
+                          AND h.kd_poli = '{$kdPoli}'
+                          AND h.kd_dokter = '{$kdDokter}'
+                        ORDER BY h.called_at DESC, h.id DESC
+                        LIMIT 1
+                    ";
+                    $antri = bukaquery($sqlAntri);
+                } else {
+                    $antri = bukaquery("
+                        SELECT b.no_reg, c.nm_pasien
+                        FROM antripoli a
+                        INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
+                        INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
+                        WHERE a.status='2'
+                          AND b.kd_poli = '{$kdPoli}'
+                          AND b.kd_dokter = '{$kdDokter}'
+                        ORDER BY a.no_rawat DESC
+                        LIMIT 1
+                    ");
+                }
+
+                if (mysqli_num_rows($antri) === 0 && $historyAvailable) {
+                    // History tersedia tetapi belum mempunyai event hari ini:
+                    // fallback ke pasien yang sedang dipanggil.
+                    $antri = bukaquery("
+                        SELECT b.no_reg, c.nm_pasien
+                        FROM antripoli a
+                        INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
+                        INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
+                        WHERE a.status='2'
+                          AND b.kd_poli = '{$kdPoli}'
+                          AND b.kd_dokter = '{$kdDokter}'
+                        ORDER BY a.no_rawat DESC
+                        LIMIT 1
+                    ");
+                }
 
                 if (mysqli_num_rows($antri) > 0) {
                     $p = mysqli_fetch_assoc($antri);
