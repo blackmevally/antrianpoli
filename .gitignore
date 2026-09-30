@@ -12,3 +12,4 @@ conf/conf.local.php
 Thumbs.db
 .vscode/
 .idea/
+conf/conf.php
