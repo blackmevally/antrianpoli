@@ -156,6 +156,29 @@ switch ($_GET['p']) {
                 }
                 mysqli_stmt_close($stmtCall);
 
+                // Record the exact call event for the e-Pasien service estimate.
+                // Logging is intentionally non-blocking: if the history table
+                // has not been migrated yet, the queue call still succeeds.
+                $stmtHistory = mysqli_prepare(
+                    $db,
+                    "INSERT INTO portal_queue_call_history
+                        (tgl_registrasi, kd_dokter, kd_poli, no_rawat, no_reg, called_at)
+                     SELECT b.tgl_registrasi, a.kd_dokter, a.kd_poli, a.no_rawat, b.no_reg, NOW()
+                     FROM antripoli a
+                     INNER JOIN reg_periksa b ON b.no_rawat=a.no_rawat
+                     WHERE a.no_rawat=?
+                     LIMIT 1"
+                );
+                if ($stmtHistory !== false) {
+                    mysqli_stmt_bind_param($stmtHistory, 's', $r['no_rawat']);
+                    if (!mysqli_stmt_execute($stmtHistory)) {
+                        error_log('queue call history insert failed: ' . mysqli_stmt_error($stmtHistory));
+                    }
+                    mysqli_stmt_close($stmtHistory);
+                } else {
+                    error_log('queue call history prepare failed');
+                }
+
                 unset($r['kd_poli'], $r['kd_dokter']);
                 $data[] = $r;
             }
