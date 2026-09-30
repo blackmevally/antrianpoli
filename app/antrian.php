@@ -285,13 +285,10 @@ switch ($_GET['p']) {
                             h.no_reg,
                             c.nm_pasien
                         FROM portal_queue_call_history h
+                        INNER JOIN reg_periksa b
+                            ON h.no_rawat = b.no_rawat
                         INNER JOIN pasien c
-                            ON h.no_rawat IN (
-                                SELECT rp.no_rawat
-                                FROM reg_periksa rp
-                                WHERE rp.no_rawat = h.no_rawat
-                                  AND rp.no_rkm_medis = c.no_rkm_medis
-                            )
+                            ON b.no_rkm_medis = c.no_rkm_medis
                         WHERE h.tgl_registrasi = CURDATE()
                           AND h.kd_poli = '{$kdPoli}'
                           AND h.kd_dokter = '{$kdDokter}'
