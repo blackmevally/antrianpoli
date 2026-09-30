@@ -251,8 +251,9 @@ switch ($_GET['p']) {
                 // 2) status=2 (sedang dipanggil) sebagai fallback jika history belum tersedia
                 // 3) status=3 sebagai fallback legacy.
                 $pasienData = [];
-                $kdPoli = mysqli_real_escape_string(bukakoneksi(), $r['kd_poli']);
-                $kdDokter = mysqli_real_escape_string(bukakoneksi(), $r['kd_dokter']);
+                // Values originate from the trusted jadwal query above.
+                $kdPoli = $r['kd_poli'];
+                $kdDokter = $r['kd_dokter'];
 
                 $sqlAntri = "
                     SELECT
