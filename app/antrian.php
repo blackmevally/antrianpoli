@@ -68,18 +68,18 @@ switch ($_GET['p']) {
         }
 
         $allowedIpsRaw = getenv('ANTRIAN_CALL_ALLOWED_IPS');
-        $allowedIps = $allowedIpsRaw === false
-            ? []
+        // Safe local default for the display when Apache/PHP runs on the same
+        // machine. LAN deployments should set ANTRIAN_CALL_ALLOWED_IPS.
+        $allowedIps = $allowedIpsRaw === false || trim($allowedIpsRaw) === ''
+            ? ['127.0.0.1', '::1']
             : array_values(array_filter(array_map('trim', explode(',', $allowedIpsRaw))));
 
         $remoteIp = $_SERVER['REMOTE_ADDR'] ?? '';
-        if (empty($allowedIps) || !in_array($remoteIp, $allowedIps, true)) {
-            http_response_code(empty($allowedIps) ? 503 : 403);
+        if (!in_array($remoteIp, $allowedIps, true)) {
+            http_response_code(403);
             echo json_encode([
                 "status" => "error",
-                "message" => empty($allowedIps)
-                    ? "Endpoint pemanggilan belum dikonfigurasi"
-                    : "Akses ditolak"
+                "message" => "Akses ditolak"
             ]);
             break;
         }
