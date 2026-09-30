@@ -1,12 +1,23 @@
 <?php
 
-$db_hostname    = "192.168.210.2";
-$db_username    = "root";
-$db_password    = "rspmkbm17";
-$db_name        = "sik";
+function required_env($name)
+{
+    $value = getenv($name);
+    if ($value === false || $value === '') {
+        error_log("Missing required environment variable: " . $name);
+        http_response_code(500);
+        exit("Server configuration error");
+    }
+    return $value;
+}
 
-define('USERHYBRIDWEB', 'yanghack');
-define('PASHYBRIDWEB', 'sialselamanya');
+$db_hostname = required_env('ANTRIAN_DB_HOST');
+$db_username = required_env('ANTRIAN_DB_USER');
+$db_password = required_env('ANTRIAN_DB_PASSWORD');
+$db_name     = required_env('ANTRIAN_DB_NAME');
+
+define('USERHYBRIDWEB', getenv('ANTRIAN_USERHYBRIDWEB') ?: '');
+define('PASHYBRIDWEB', getenv('ANTRIAN_PASSWORDHYBRIDWEB') ?: '');
 
 function host()
 {
@@ -628,8 +639,8 @@ function validation_errors($error)
 
 function encrypt_decrypt($string, $action)
 {
-    $secret_key     = 'Bar12345Bar12345';
-    $secret_iv      = 'sayangsamakhanza';
+    $secret_key     = required_env('ANTRIAN_SECRET_KEY');
+    $secret_iv      = required_env('ANTRIAN_SECRET_IV');
     $output         = FALSE;
     $encrypt_method = "AES-256-CBC";
     $key            = hash('sha256', $secret_key);
@@ -649,15 +660,15 @@ function encrypt_decrypt($string, $action)
 
 function decrypt($input)
 {
-    $secret_key     = 'Bar12345Bar12345';
-    $secret_iv      = 'sayangsamakhanza';
+    $secret_key     = required_env('ANTRIAN_SECRET_KEY');
+    $secret_iv      = required_env('ANTRIAN_SECRET_IV');
     return openssl_decrypt(base64_decode($input), 'AES-128-CBC', $secret_key, OPENSSL_RAW_DATA, $secret_iv);
 }
 
 function encrypt($input)
 {
-    $secret_key     = 'Bar12345Bar12345';
-    $secret_iv      = 'sayangsamakhanza';
+    $secret_key     = required_env('ANTRIAN_SECRET_KEY');
+    $secret_iv      = required_env('ANTRIAN_SECRET_IV');
     return base64_encode(openssl_encrypt($input, 'AES-128-CBC', $secret_key, OPENSSL_RAW_DATA, $secret_iv));
 }
 

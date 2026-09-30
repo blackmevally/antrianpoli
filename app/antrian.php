@@ -58,34 +58,121 @@ switch ($_GET['p']) {
        🔹 PEMANGGILAN SUARA (status=1 → 2)
        ============================================================= */
     case 'panggil':
-        $sql = "
-            SELECT 
-                a.no_rawat, b.no_reg, c.nm_pasien, 
-                d.nm_poli, e.nm_dokter
-            FROM antripoli a
-            INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
-            INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
-            INNER JOIN poliklinik d ON b.kd_poli = d.kd_poli
-            INNER JOIN dokter e ON b.kd_dokter = e.kd_dokter
-            WHERE a.status='1' 
-            AND d.kd_poli IN ($poli_filter)
-            " . (!empty($dokter_filter) ? "AND e.kd_dokter IN ($dokter_filter)" : "") . "
-            ORDER BY a.no_rawat ASC 
-            LIMIT 1
-        ";
-
-        $hasil = bukaquery($sql);
-        $data = [];
-
-        if (mysqli_num_rows($hasil) > 0) {
-            $r = mysqli_fetch_assoc($hasil);
-            $data[] = $r;
-
-            // 🔄 Update status antrian
-            bukaquery2("UPDATE antripoli SET status='3' WHERE status='2'");
-            bukaquery2("UPDATE antripoli SET status='2' WHERE no_rawat='{$r['no_rawat']}'");
+        // This endpoint changes queue state. Keep it POST-only and restricted
+        // to explicitly trusted display-client IPs configured on the server.
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            header('Allow: POST');
+            echo json_encode(["status" => "error", "message" => "Method tidak diizinkan"]);
+            break;
         }
 
+        $allowedIpsRaw = getenv('ANTRIAN_CALL_ALLOWED_IPS');
+        $allowedIps = $allowedIpsRaw === false
+            ? []
+            : array_values(array_filter(array_map('trim', explode(',', $allowedIpsRaw))));
+
+        $remoteIp = $_SERVER['REMOTE_ADDR'] ?? '';
+        if (empty($allowedIps) || !in_array($remoteIp, $allowedIps, true)) {
+            http_response_code(empty($allowedIps) ? 503 : 403);
+            echo json_encode([
+                "status" => "error",
+                "message" => empty($allowedIps)
+                    ? "Endpoint pemanggilan belum dikonfigurasi"
+                    : "Akses ditolak"
+            ]);
+            break;
+        }
+
+        $db = bukakoneksi();
+        mysqli_set_charset($db, 'utf8mb4');
+        $data = [];
+
+        try {
+            if (!mysqli_begin_transaction($db)) {
+                throw new RuntimeException('transaction start failed');
+            }
+
+            // Lock only the next waiting call so two display clients cannot
+            // consume the same patient concurrently.
+            $sql = "
+                SELECT
+                    a.no_rawat, b.no_reg, c.nm_pasien,
+                    d.nm_poli, e.nm_dokter,
+                    d.kd_poli, e.kd_dokter
+                FROM antripoli a
+                INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
+                INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
+                INNER JOIN poliklinik d ON b.kd_poli = d.kd_poli
+                INNER JOIN dokter e ON b.kd_dokter = e.kd_dokter
+                WHERE a.status='1'
+                AND d.kd_poli IN ($poli_filter)
+                " . (!empty($dokter_filter) ? "AND e.kd_dokter IN ($dokter_filter)" : "") . "
+                ORDER BY a.no_rawat ASC
+                LIMIT 1
+                FOR UPDATE
+            ";
+
+            $hasil = mysqli_query($db, $sql);
+            if ($hasil === false) {
+                throw new RuntimeException('queue select failed');
+            }
+
+            if (mysqli_num_rows($hasil) > 0) {
+                $r = mysqli_fetch_assoc($hasil);
+
+                // Finish the previously displayed call only for this exact
+                // poli + doctor pair. Never close status=2 globally.
+                $stmtFinish = mysqli_prepare(
+                    $db,
+                    "UPDATE antripoli a
+                     INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
+                     SET a.status='3'
+                     WHERE a.status='2'
+                       AND b.kd_poli=?
+                       AND b.kd_dokter=?"
+                );
+                if ($stmtFinish === false) {
+                    throw new RuntimeException('finish statement prepare failed');
+                }
+                mysqli_stmt_bind_param($stmtFinish, 'ss', $r['kd_poli'], $r['kd_dokter']);
+                if (!mysqli_stmt_execute($stmtFinish)) {
+                    throw new RuntimeException('finish update failed');
+                }
+                mysqli_stmt_close($stmtFinish);
+
+                // Promote only the selected patient to the currently-called state.
+                $stmtCall = mysqli_prepare(
+                    $db,
+                    "UPDATE antripoli SET status='2' WHERE no_rawat=? AND status='1'"
+                );
+                if ($stmtCall === false) {
+                    throw new RuntimeException('call statement prepare failed');
+                }
+                mysqli_stmt_bind_param($stmtCall, 's', $r['no_rawat']);
+                if (!mysqli_stmt_execute($stmtCall) || mysqli_stmt_affected_rows($stmtCall) !== 1) {
+                    mysqli_stmt_close($stmtCall);
+                    throw new RuntimeException('call update failed');
+                }
+                mysqli_stmt_close($stmtCall);
+
+                unset($r['kd_poli'], $r['kd_dokter']);
+                $data[] = $r;
+            }
+
+            if (!mysqli_commit($db)) {
+                throw new RuntimeException('transaction commit failed');
+            }
+        } catch (Throwable $e) {
+            mysqli_rollback($db);
+            error_log('antrian panggil error: ' . $e->getMessage());
+            http_response_code(500);
+            echo json_encode(["status" => "error", "message" => "Gagal memproses pemanggilan"]);
+            mysqli_close($db);
+            break;
+        }
+
+        mysqli_close($db);
         echo json_encode($data);
         break;
 

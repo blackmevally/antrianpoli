@@ -1,0 +1,14 @@
+# Local/runtime configuration
+conf/conf.local.php
+.env
+.env.*
+!.env.example
+
+# Runtime logs
+*.log
+
+# Local OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

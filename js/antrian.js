@@ -5,6 +5,9 @@ const VIDEO_VOLUME_MUTE = 0.0;     // mute penuh saat TTS aktif
 
 let lastCalled = {};
 let activeHighlight = null;
+let callInFlight = false;
+let hlsInstance = null;
+let streamRetryTimer = null;
 
 /* ==========================================================
    🔹 STREAM DARI SERVER LINUX (NGINX + OBS)
@@ -21,14 +24,26 @@ function startStream() {
   video.loop = true;
 
   function playStream(url) {
+    if (streamRetryTimer) {
+      clearTimeout(streamRetryTimer);
+      streamRetryTimer = null;
+    }
+
+    if (hlsInstance) {
+      hlsInstance.destroy();
+      hlsInstance = null;
+    }
+
     if (Hls.isSupported()) {
-      const hls = new Hls({ maxBufferLength: 10 });
-      hls.loadSource(url);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.ERROR, (event, data) => {
+      hlsInstance = new Hls({ maxBufferLength: 10 });
+      hlsInstance.loadSource(url);
+      hlsInstance.attachMedia(video);
+      hlsInstance.on(Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
           console.warn("⚠️ Stream error, mencoba ulang...");
-          setTimeout(() => playStream(url), 4000);
+          hlsInstance.destroy();
+          hlsInstance = null;
+          streamRetryTimer = setTimeout(() => playStream(url), 4000);
         }
       });
     } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
@@ -128,15 +143,24 @@ function angkaKeTeks(angka) {
    🔊 PEMANGGILAN SUARA (sinkron notif + TTS + ducking)
    ========================================================== */
 function panggilSuara() {
-  $.getJSON("app/antrian.php?p=panggil", data => {
-    if (!data || data.length === 0) return;
+  if (callInFlight) return;
+  callInFlight = true;
+
+  $.ajax({
+    url: "app/antrian.php?p=panggil",
+    method: "POST",
+    dataType: "json",
+    cache: false
+  }).done(data => {
+    if (!Array.isArray(data) || data.length === 0) return;
+
     const v = document.getElementById("tvStream");
     const a = document.getElementById("notif");
 
     data.forEach(item => {
       updateNomorDisplay(item);
 
-      const key = `${item.nm_poli}-${item.nm_dokter}`;
+      const key = item.nm_poli + "-" + item.nm_dokter;
       lastCalled[key] = {
         nm_poli: item.nm_poli,
         nm_dokter: item.nm_dokter,
@@ -144,13 +168,16 @@ function panggilSuara() {
         nm_pasien: item.nm_pasien
       };
 
-      let namaTTS = item.nm_pasien.toUpperCase()
+      let namaTTS = String(item.nm_pasien || "").toUpperCase()
         .replace(/\bTN\b/g, "Tuan")
         .replace(/\bNY\b/g, "Nyonya")
         .replace(/\bNN\b/g, "Nona")
         .replace(/\bBY\b/g, "Bayi");
 
-      const teksRaw = `Nomor antrian ${item.no_reg}, atas nama ${namaTTS}, silakan menuju ${item.nm_poli}, ${item.nm_dokter}`;
+      const teksRaw = "Nomor antrian " + item.no_reg +
+        ", atas nama " + namaTTS +
+        ", silakan menuju " + item.nm_poli +
+        ", " + item.nm_dokter;
       const teks = normalizeTTS(teksRaw);
 
       a.src = AUDIO_PATH;
@@ -158,20 +185,16 @@ function panggilSuara() {
 
       a.play().then(() => {
         highlightPoli(item.nm_poli, item.nm_dokter);
-
-        // aktifkan efek glow pada kotak utama
         triggerGlow(true);
 
         a.onended = function () {
-          // mute video sebelum TTS
-          if (v) { v.muted = true; v.volume = 0.0; }
+          if (v) { v.muted = true; v.volume = VIDEO_VOLUME_MUTE; }
 
           responsiveVoice.speak(teks, "Indonesian Female", {
             rate: 1,
             pitch: 1,
             volume: 1,
             onend: () => {
-              // kembalikan volume normal
               if (v) { v.muted = false; v.volume = VIDEO_VOLUME_NORMAL; }
               $(".poli-card").removeClass("heartbeat");
               triggerGlow(false);
@@ -180,6 +203,12 @@ function panggilSuara() {
         };
       }).catch(() => {});
     });
+  }).fail((xhr) => {
+    if (xhr.status !== 403 && xhr.status !== 503) {
+      console.warn("⚠️ Gagal mengambil pemanggilan antrean:", xhr.status);
+    }
+  }).always(() => {
+    callInFlight = false;
   });
 }
 
@@ -196,13 +225,18 @@ function triggerGlow(active = true) {
 /* ==========================================================
    💡 UPDATE NOMOR UTAMA
    ========================================================== */
+function escapeHtml(value) {
+  return $("<div>").text(value ?? "").html();
+}
+
 function updateNomorDisplay(item) {
   if (!item || item.no_reg === "000") return;
-  $("#nomor-box").html(`
-    <h2>${item.nm_pasien}</h2>
-    <h1>${item.no_reg}</h1>
-    <b>${item.nm_poli} - ${item.nm_dokter}</b>
-  `);
+
+  $("#nomor-box").html(
+    "<h2>" + escapeHtml(item.nm_pasien) + "</h2>" +
+    "<h1>" + escapeHtml(item.no_reg) + "</h1>" +
+    "<b>" + escapeHtml(item.nm_poli) + " - " + escapeHtml(item.nm_dokter) + "</b>"
+  );
 }
 
 /* ==========================================================
@@ -280,12 +314,12 @@ function tampilDaftarPoli() {
 
       const c = $(`
         <div class='poli-card'>
-          <h5>${p.nm_poli}</h5>
-          <small>${p.nm_dokter}</small>
+          <h5>${escapeHtml(p.nm_poli)}</h5>
+          <small>${escapeHtml(p.nm_dokter)}</small>
           <hr>
           <div>
-            <h2>${pasien.no_reg}</h2>
-            <h6>${pasien.nm_pasien}</h6>
+            <h2>${escapeHtml(pasien.no_reg)}</h2>
+            <h6>${escapeHtml(pasien.nm_pasien)}</h6>
           </div>
         </div>
       `);
