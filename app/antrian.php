@@ -97,8 +97,23 @@ switch ($_GET['p']) {
             $r = mysqli_fetch_assoc($hasil);
             $data[] = $r;
 
+            // Finalize nomor yang sedang dipanggil sebelumnya, lalu tandai nomor baru sebagai sedang dipanggil.
             bukaquery2("UPDATE antripoli SET status='3' WHERE status='2'");
-            bukaquery2("UPDATE antripoli SET status='2' WHERE no_rawat='" . sql_escape($r['no_rawat']) . "'");
+            $updatedCall = bukaquery2("UPDATE antripoli SET status='2' WHERE no_rawat='" . sql_escape($r['no_rawat']) . "'");
+
+            // Catat timestamp event pemanggilan pada tabel history portal.
+            // Jika tabel history belum dimigrasikan, kegagalan logging tidak boleh
+            // menghentikan mesin pemanggil utama.
+            if ($updatedCall) {
+                $noRawatLog = sql_escape($r['no_rawat']);
+                bukaquery2("INSERT INTO portal_queue_call_history
+                    (tgl_registrasi, kd_dokter, kd_poli, no_rawat, no_reg, called_at)
+                    SELECT b.tgl_registrasi, a.kd_dokter, a.kd_poli, a.no_rawat, b.no_reg, NOW()
+                    FROM antripoli a
+                    INNER JOIN reg_periksa b ON b.no_rawat=a.no_rawat
+                    WHERE a.no_rawat='$noRawatLog'
+                    LIMIT 1");
+            }
         }
 
         echo json_encode($data);
