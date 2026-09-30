@@ -249,7 +249,7 @@ audio { display: none; }
   <span id="running-message">Gunakan obat sesuai petunjuk dokter/apoteker. Selalu jaga kebersihan tangan dan kesehatan Anda.</span>
 </div>
 
-<audio id="notif" src="assets/notif.mp3"></audio>
+<audio id="notif" src="assets/notif.mp3" preload="auto" playsinline></audio>
 
 <script>
 const VIDEO_VOLUME_NORMAL = 0.3;
@@ -393,6 +393,46 @@ if ("speechSynthesis" in window) {
   speechSynthesis.onvoiceschanged = loadTtsVoices;
 }
 
+function playNotificationThenSpeak(teks, notif, done) {
+  if (!notif) {
+    done();
+    return;
+  }
+
+  notif.pause();
+  notif.currentTime = 0;
+  notif.volume = 1;
+  notif.muted = false;
+
+  let finished = false;
+  const finishAndSpeak = function() {
+    if (finished) return;
+    finished = true;
+    notif.removeEventListener("ended", finishAndSpeak);
+    notif.removeEventListener("error", finishAndSpeak);
+    done();
+  };
+
+  notif.addEventListener("ended", finishAndSpeak, { once: true });
+  notif.addEventListener("error", function(e) {
+    console.warn("notif.mp3 gagal diputar:", e);
+    finishAndSpeak();
+  }, { once: true });
+
+  try {
+    const p = notif.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(function(err) {
+        console.warn("notif.mp3 diblokir browser:", err);
+        finishAndSpeak();
+      });
+    }
+  } catch (e) {
+    console.warn("notif.mp3 exception:", e);
+    finishAndSpeak();
+  }
+}
+
 function speakQueueText(teks, notif) {
   triggerGlow(true);
   setVideoVolume(VIDEO_VOLUME_MUTE, true);
@@ -402,48 +442,50 @@ function speakQueueText(teks, notif) {
     setVideoVolume(VIDEO_VOLUME_NORMAL, false);
   }
 
-  // Use the browser's native Indonesian speech engine as the primary path.
-  // This avoids ResponsiveVoice's separate audio/autoplay pipeline.
-  if ("speechSynthesis" in window && ttsUnlocked) {
-    try {
-      speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(teks);
-      u.lang = ttsVoice ? ttsVoice.lang : "id-ID";
-      if (ttsVoice) u.voice = ttsVoice;
-      u.rate = 0.95;
-      u.pitch = 1;
-      u.volume = 1;
-      u.onend = done;
-      u.onerror = function(e) {
-        console.warn("Web Speech TTS error:", e);
-        done();
-      };
-      speechSynthesis.speak(u);
-      return;
-    } catch (e) {
-      console.warn("Web Speech TTS gagal:", e);
+  function speak() {
+    // Native Web Speech is preferred after the user has unlocked audio.
+    if ("speechSynthesis" in window && ttsUnlocked) {
+      try {
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(teks);
+        u.lang = ttsVoice ? ttsVoice.lang : "id-ID";
+        if (ttsVoice) u.voice = ttsVoice;
+        u.rate = 0.95;
+        u.pitch = 1;
+        u.volume = 1;
+        u.onend = done;
+        u.onerror = function(e) {
+          console.warn("Web Speech TTS error:", e);
+          done();
+        };
+        speechSynthesis.speak(u);
+        return;
+      } catch (e) {
+        console.warn("Web Speech TTS gagal:", e);
+      }
     }
+
+    if (window.responsiveVoice && typeof responsiveVoice.speak === "function") {
+      try {
+        responsiveVoice.speak(teks, "Indonesian Female", {
+          rate: 0.95,
+          pitch: 1,
+          volume: 1,
+          onend: done
+        });
+        return;
+      } catch (e) {
+        console.warn("ResponsiveVoice gagal:", e);
+      }
+    }
+
+    console.error("Engine TTS tidak tersedia atau belum diaktifkan.");
+    done();
   }
 
-  // Fallback to ResponsiveVoice if native speech is unavailable.
-  if (window.responsiveVoice && typeof responsiveVoice.speak === "function") {
-    try {
-      responsiveVoice.speak(teks, "Indonesian Female", {
-        rate: 0.95,
-        pitch: 1,
-        volume: 1,
-        onend: done
-      });
-      return;
-    } catch (e) {
-      console.warn("ResponsiveVoice gagal:", e);
-    }
-  }
-
-  console.error("Engine TTS tidak tersedia atau belum diaktifkan.");
-  done();
+  // Notification must finish BEFORE TTS starts.
+  playNotificationThenSpeak(teks, notif, speak);
 }
-
 function unlockTts() {
   ttsUnlocked = true;
   loadTtsVoices();
@@ -577,7 +619,7 @@ $(function(){
   updateClock();setInterval(updateClock,1000);
   setInterval(panggilSuara,3000);
   updateDataPoli();setInterval(updateDataPoli,3000);
-  $("#btnTestAV").on("click",()=>{unlockTts(); const a=$("#notif")[0]; if(a){a.currentTime=0; const p=a.play(); if(p&&p.catch)p.catch(()=>{});} });
+  $("#btnTestAV").on("click",()=>{unlockTts(); const a=$("#notif")[0]; if(a){a.pause();a.currentTime=0;a.volume=1;a.muted=false;const p=a.play();if(p&&p.catch)p.catch(err=>console.warn("notif.mp3 test gagal:",err));} });
 });
 </script>
 </body>
