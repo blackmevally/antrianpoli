@@ -254,6 +254,8 @@ audio { display: none; }
 <script>
 const VIDEO_VOLUME_NORMAL = 0.3;
 const VIDEO_VOLUME_MUTE = 0.0;
+let ttsUnlocked = false;
+let ttsVoice = null;
 
 /* 🔊 Video Volume Control */
 function setVideoVolume(vol, mute=false){
@@ -377,6 +379,20 @@ function panggilSuara() {
   });
 }
 
+function loadTtsVoices() {
+  if (!("speechSynthesis" in window)) return;
+  const voices = speechSynthesis.getVoices();
+  ttsVoice = voices.find(v => /^id(-|_)?ID$/i.test(v.lang))
+    || voices.find(v => /^id/i.test(v.lang))
+    || voices.find(v => /indones/i.test(v.name))
+    || null;
+}
+
+if ("speechSynthesis" in window) {
+  loadTtsVoices();
+  speechSynthesis.onvoiceschanged = loadTtsVoices;
+}
+
 function speakQueueText(teks, notif) {
   triggerGlow(true);
   setVideoVolume(VIDEO_VOLUME_MUTE, true);
@@ -386,50 +402,78 @@ function speakQueueText(teks, notif) {
     setVideoVolume(VIDEO_VOLUME_NORMAL, false);
   }
 
-  function speak() {
-    if (window.responsiveVoice && typeof responsiveVoice.speak === "function") {
-      try {
-        responsiveVoice.speak(teks, "Indonesian Female", {
-          rate: 1,
-          pitch: 1.0,
-          volume: 1,
-          onend: done
-        });
-        return;
-      } catch (e) {
-        console.warn("ResponsiveVoice gagal:", e);
-      }
-    }
-
-    if ("speechSynthesis" in window) {
+  // Use the browser's native Indonesian speech engine as the primary path.
+  // This avoids ResponsiveVoice's separate audio/autoplay pipeline.
+  if ("speechSynthesis" in window && ttsUnlocked) {
+    try {
+      speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(teks);
-      u.lang = "id-ID";
+      u.lang = ttsVoice ? ttsVoice.lang : "id-ID";
+      if (ttsVoice) u.voice = ttsVoice;
       u.rate = 0.95;
+      u.pitch = 1;
       u.volume = 1;
       u.onend = done;
-      speechSynthesis.cancel();
+      u.onerror = function(e) {
+        console.warn("Web Speech TTS error:", e);
+        done();
+      };
       speechSynthesis.speak(u);
       return;
+    } catch (e) {
+      console.warn("Web Speech TTS gagal:", e);
     }
-
-    console.error("Engine TTS tidak tersedia.");
-    done();
   }
 
-  // Bunyi notifikasi adalah tambahan, bukan syarat TTS.
-  // Jika browser memblokir audio element, TTS tetap dijalankan.
-  try {
-    notif.currentTime = 0;
-    const p = notif.play();
-    if (p && typeof p.then === "function") {
-      p.catch(function(err) {
-        console.warn("Notif audio diblokir:", err);
-      }).finally(speak);
-    } else {
-      speak();
+  // Fallback to ResponsiveVoice if native speech is unavailable.
+  if (window.responsiveVoice && typeof responsiveVoice.speak === "function") {
+    try {
+      responsiveVoice.speak(teks, "Indonesian Female", {
+        rate: 0.95,
+        pitch: 1,
+        volume: 1,
+        onend: done
+      });
+      return;
+    } catch (e) {
+      console.warn("ResponsiveVoice gagal:", e);
     }
-  } catch (e) {
-    speak();
+  }
+
+  console.error("Engine TTS tidak tersedia atau belum diaktifkan.");
+  done();
+}
+
+function unlockTts() {
+  ttsUnlocked = true;
+  loadTtsVoices();
+
+  if ("speechSynthesis" in window) {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance("Tes suara antrian aktif");
+    u.lang = ttsVoice ? ttsVoice.lang : "id-ID";
+    if (ttsVoice) u.voice = ttsVoice;
+    u.rate = 0.95;
+    u.volume = 1;
+    u.onend = function() {
+      $("#btnTestAV").text("✅ Audio Aktif").css("background","#4CAF50");
+      setVideoVolume(VIDEO_VOLUME_NORMAL, false);
+    };
+    u.onerror = function(e) {
+      console.warn("Tes Web Speech gagal:", e);
+      $("#btnTestAV").text("⚠️ TTS Gagal").css("background","#f44336");
+    };
+    speechSynthesis.speak(u);
+    return;
+  }
+
+  // Last fallback: ResponsiveVoice.
+  if (window.responsiveVoice && typeof responsiveVoice.speak === "function") {
+    responsiveVoice.speak("Tes suara antrian aktif", "Indonesian Female", {
+      onend: function() {
+        $("#btnTestAV").text("✅ Audio Aktif").css("background","#4CAF50");
+      }
+    });
   }
 }
 /* ✨ Fungsi bantu: ubah huruf kapital agar tidak dieja oleh TTS */
@@ -533,7 +577,7 @@ $(function(){
   updateClock();setInterval(updateClock,1000);
   setInterval(panggilSuara,3000);
   updateDataPoli();setInterval(updateDataPoli,3000);
-  $("#btnTestAV").on("click",()=>{const a=$("#notif")[0];a.play();responsiveVoice.speak("Tes suara antrian aktif","Indonesian Female");$("#btnTestAV").text("✅ Audio Aktif").css("background","#4CAF50");});
+  $("#btnTestAV").on("click",()=>{unlockTts(); const a=$("#notif")[0]; if(a){a.currentTime=0; const p=a.play(); if(p&&p.catch)p.catch(()=>{});} });
 });
 </script>
 </body>
