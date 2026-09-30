@@ -67,23 +67,8 @@ switch ($_GET['p']) {
             break;
         }
 
-        $allowedIpsRaw = getenv('ANTRIAN_CALL_ALLOWED_IPS');
-        // Safe local default for the display when Apache/PHP runs on the same
-        // machine. LAN deployments should set ANTRIAN_CALL_ALLOWED_IPS.
-        $allowedIps = $allowedIpsRaw === false || trim($allowedIpsRaw) === ''
-            ? ['127.0.0.1', '::1']
-            : array_values(array_filter(array_map('trim', explode(',', $allowedIpsRaw))));
-
-        $remoteIp = $_SERVER['REMOTE_ADDR'] ?? '';
-        if (!in_array($remoteIp, $allowedIps, true)) {
-            http_response_code(403);
-            echo json_encode([
-                "status" => "error",
-                "message" => "Akses ditolak"
-            ]);
-            break;
-        }
-
+        // Endpoint pemanggilan dapat digunakan dari semua IP jaringan.
+        // POST tetap diwajibkan agar endpoint tidak terpicu oleh request GET.
         $db = bukakoneksi();
         mysqli_set_charset($db, 'utf8mb4');
         $data = [];
