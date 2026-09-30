@@ -350,44 +350,88 @@ function triggerGlow(a=true){const b=$("#nomor-box");a?b.addClass("active"):b.re
 
 /* === 🔊 Fungsi pemanggil suara (fix: tidak eja huruf kapital) === */
 function panggilSuara() {
-  $.getJSON("app/antrian.php?p=panggil", data => {
-    if (!data || data.length === 0) return;
+  $.ajax({
+    url: "app/antrian.php?p=panggil",
+    method: "POST",
+    dataType: "json",
+    cache: false
+  }).done(function(data) {
+    if (!Array.isArray(data) || data.length === 0) return;
+
     const notif = $("#notif")[0];
 
-    data.forEach(i => {
-      // 🔹 Update tampilan nomor asli dari database
+    data.forEach(function(i) {
       updateNomorDisplay(i);
 
       const angka = parseInt(i.no_reg, 10);
       const teksNomor = angkaTerbilang(angka);
-
-      // 🔹 Normalisasi nama untuk TTS (tanpa ejaan)
       const namaTTS = perbaikiNamaNatural(normalisasiGelar(i.nm_pasien));
       const dokterTTS = normalisasiGelar(i.nm_dokter);
       const poliTTS = normalisasiGelar(i.nm_poli);
-
-      // 🔹 Kalimat natural
       const teks = `Nomor antrian ${teksNomor}, atas nama ${namaTTS}, silakan menuju ${poliTTS}, ${dokterTTS}.`;
 
-      // 🔊 Jalankan suara
-      notif.currentTime = 0;
-      notif.play().then(() => {
-        triggerGlow(true);
+      speakQueueText(teks, notif);
+    });
+  }).fail(function(xhr) {
+    console.warn("Gagal memproses panggilan antrean:", xhr.status, xhr.responseText || "");
+  });
+}
+
+function speakQueueText(teks, notif) {
+  triggerGlow(true);
+  setVideoVolume(VIDEO_VOLUME_MUTE, true);
+
+  function done() {
+    triggerGlow(false);
+    setVideoVolume(VIDEO_VOLUME_NORMAL, false);
+  }
+
+  function speak() {
+    if (window.responsiveVoice && typeof responsiveVoice.speak === "function") {
+      try {
         responsiveVoice.speak(teks, "Indonesian Female", {
           rate: 1,
           pitch: 1.0,
           volume: 1,
-          onstart: () => setVideoVolume(VIDEO_VOLUME_MUTE, true),
-          onend: () => {
-            triggerGlow(false);
-            setVideoVolume(VIDEO_VOLUME_NORMAL, false);
-          }
+          onend: done
         });
-      });
-    });
-  });
-}
+        return;
+      } catch (e) {
+        console.warn("ResponsiveVoice gagal:", e);
+      }
+    }
 
+    if ("speechSynthesis" in window) {
+      const u = new SpeechSynthesisUtterance(teks);
+      u.lang = "id-ID";
+      u.rate = 0.95;
+      u.volume = 1;
+      u.onend = done;
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+      return;
+    }
+
+    console.error("Engine TTS tidak tersedia.");
+    done();
+  }
+
+  // Bunyi notifikasi adalah tambahan, bukan syarat TTS.
+  // Jika browser memblokir audio element, TTS tetap dijalankan.
+  try {
+    notif.currentTime = 0;
+    const p = notif.play();
+    if (p && typeof p.then === "function") {
+      p.catch(function(err) {
+        console.warn("Notif audio diblokir:", err);
+      }).finally(speak);
+    } else {
+      speak();
+    }
+  } catch (e) {
+    speak();
+  }
+}
 /* ✨ Fungsi bantu: ubah huruf kapital agar tidak dieja oleh TTS */
 function perbaikiNamaNatural(nama) {
   if (!nama) return "";

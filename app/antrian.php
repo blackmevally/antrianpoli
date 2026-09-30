@@ -58,8 +58,8 @@ switch ($_GET['p']) {
        🔹 PEMANGGILAN SUARA (status=1 → 2)
        ============================================================= */
     case 'panggil':
-        // This endpoint changes queue state. Keep it POST-only and restricted
-        // to explicitly trusted display-client IPs configured on the server.
+        // This endpoint changes queue state. Keep it POST-only so it cannot be
+        // triggered accidentally by a normal GET request. All source IPs are allowed.
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
             http_response_code(405);
             header('Allow: POST');
@@ -67,23 +67,8 @@ switch ($_GET['p']) {
             break;
         }
 
-        $allowedIpsRaw = getenv('ANTRIAN_CALL_ALLOWED_IPS');
-        $allowedIps = $allowedIpsRaw === false
-            ? []
-            : array_values(array_filter(array_map('trim', explode(',', $allowedIpsRaw))));
-
-        $remoteIp = $_SERVER['REMOTE_ADDR'] ?? '';
-        if (empty($allowedIps) || !in_array($remoteIp, $allowedIps, true)) {
-            http_response_code(empty($allowedIps) ? 503 : 403);
-            echo json_encode([
-                "status" => "error",
-                "message" => empty($allowedIps)
-                    ? "Endpoint pemanggilan belum dikonfigurasi"
-                    : "Akses ditolak"
-            ]);
-            break;
-        }
-
+        // Endpoint pemanggilan dapat digunakan dari semua IP jaringan.
+        // POST tetap diwajibkan agar endpoint tidak terpicu oleh request GET.
         $db = bukakoneksi();
         mysqli_set_charset($db, 'utf8mb4');
         $data = [];
