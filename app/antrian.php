@@ -58,8 +58,8 @@ switch ($_GET['p']) {
        🔹 PEMANGGILAN SUARA (status=1 → 2)
        ============================================================= */
     case 'panggil':
-        // This endpoint changes queue state. Keep it POST-only and restricted
-        // to explicitly trusted display-client IPs configured on the server.
+        // This endpoint changes queue state. Keep it POST-only so it cannot be
+        // triggered accidentally by a normal GET request. All source IPs are allowed.
         if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
             http_response_code(405);
             header('Allow: POST');
