@@ -19,6 +19,27 @@ $db_name     = required_env('ANTRIAN_DB_NAME');
 define('USERHYBRIDWEB', getenv('ANTRIAN_USERHYBRIDWEB') ?: '');
 define('PASHYBRIDWEB', getenv('ANTRIAN_PASSWORDHYBRIDWEB') ?: '');
 
+$portal_db_hostname = getenv('PASIENRSPM_PORTAL_DB_HOST') ?: '127.0.0.1';
+$portal_db_username = getenv('PASIENRSPM_PORTAL_DB_USER') ?: '';
+$portal_db_password = getenv('PASIENRSPM_PORTAL_DB_PASSWORD') ?: '';
+$portal_db_name     = getenv('PASIENRSPM_PORTAL_DB_NAME') ?: 'pasienrspm';
+
+function bukaPortalKoneksi()
+{
+    global $portal_db_hostname, $portal_db_username, $portal_db_password, $portal_db_name;
+    if ($portal_db_username === '' || $portal_db_password === '') {
+        return false;
+    }
+    $db = mysqli_init();
+    mysqli_options($db, MYSQLI_OPT_CONNECT_TIMEOUT, 5);
+    if (!mysqli_real_connect($db, $portal_db_hostname, $portal_db_username, $portal_db_password, $portal_db_name)) {
+        return false;
+    }
+    mysqli_set_charset($db, 'utf8mb4');
+    return $db;
+}
+
+
 function host()
 {
     global $db_hostname;

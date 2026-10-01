@@ -141,30 +141,16 @@ switch ($_GET['p']) {
                 }
                 mysqli_stmt_close($stmtCall);
 
-                // Record the exact call event for the e-Pasien service estimate.
-                // Logging is intentionally non-blocking: if the history table
-                // has not been migrated yet, the queue call still succeeds.
-                $stmtHistory = mysqli_prepare(
-                    $db,
-                    "INSERT INTO portal_queue_call_history
-                        (tgl_registrasi, kd_dokter, kd_poli, no_rawat, no_reg, called_at)
-                     SELECT b.tgl_registrasi, a.kd_dokter, a.kd_poli, a.no_rawat, b.no_reg, NOW()
-                     FROM antripoli a
-                     INNER JOIN reg_periksa b ON b.no_rawat=a.no_rawat
-                     WHERE a.no_rawat=?
-                     LIMIT 1"
+                // Keep the clinical transaction isolated on Khanza.
+                // portal_queue_call_history is supplemental portal state and
+                // is written only after the Khanza transaction commits.
+                $historyEvent = array(
+                    'tgl_registrasi' => date('Y-m-d'),
+                    'kd_dokter' => $r['kd_dokter'],
+                    'kd_poli' => $r['kd_poli'],
+                    'no_rawat' => $r['no_rawat'],
+                    'no_reg' => $r['no_reg'],
                 );
-                if ($stmtHistory !== false) {
-                    mysqli_stmt_bind_param($stmtHistory, 's', $r['no_rawat']);
-                    if (!mysqli_stmt_execute($stmtHistory)) {
-                        error_log('queue call history insert failed: ' . mysqli_stmt_error($stmtHistory));
-                    }
-                    mysqli_stmt_close($stmtHistory);
-                } else {
-                    error_log('queue call history prepare failed');
-                }
-
-                unset($r['kd_poli'], $r['kd_dokter']);
                 $data[] = $r;
             }
 
@@ -181,6 +167,39 @@ switch ($_GET['p']) {
         }
 
         mysqli_close($db);
+
+        // Best-effort portal history write after the Khanza transaction commits.
+        // A history outage must never roll back or block the queue call.
+        if (!empty($historyEvent)) {
+            $portalDb = bukaPortalKoneksi();
+            if ($portalDb) {
+                $stmtHistory = mysqli_prepare(
+                    $portalDb,
+                    "INSERT INTO portal_queue_call_history
+                        (tgl_registrasi, kd_dokter, kd_poli, no_rawat, no_reg, called_at)
+                     VALUES(?,?,?,?,?,NOW())"
+                );
+                if ($stmtHistory) {
+                    mysqli_stmt_bind_param(
+                        $stmtHistory,
+                        'sssss',
+                        $historyEvent['tgl_registrasi'],
+                        $historyEvent['kd_dokter'],
+                        $historyEvent['kd_poli'],
+                        $historyEvent['no_rawat'],
+                        $historyEvent['no_reg']
+                    );
+                    if (!mysqli_stmt_execute($stmtHistory)) {
+                        error_log('queue portal history insert failed: '.mysqli_stmt_error($stmtHistory));
+                    }
+                    mysqli_stmt_close($stmtHistory);
+                } else {
+                    error_log('queue portal history prepare failed');
+                }
+                mysqli_close($portalDb);
+            }
+        }
+
         echo json_encode($data);
         break;
 
@@ -255,48 +274,64 @@ switch ($_GET['p']) {
                 $kdPoli = $r['kd_poli'];
                 $kdDokter = $r['kd_dokter'];
 
-                $sqlAntri = "
-                    SELECT
-                        h.no_reg,
-                        c.nm_pasien
-                    FROM portal_queue_call_history h
-                    INNER JOIN pasien c ON h.no_rawat = c.no_rkm_medis
-                    WHERE 1=0
-                    LIMIT 1
-                ";
-
-                // Gunakan history jika tabel tersedia.
-                $dbCheck = bukakoneksi();
+                // History is portal-owned. Read the latest event from the
+                // portal DB first, then resolve the patient name through Khanza.
                 $historyAvailable = false;
-                $tableCheck = mysqli_query(
-                    $dbCheck,
-                    "SELECT 1 FROM information_schema.tables
-                     WHERE table_schema = DATABASE()
-                       AND table_name = 'portal_queue_call_history'
-                     LIMIT 1"
-                );
-                if ($tableCheck && mysqli_num_rows($tableCheck) > 0) {
-                    $historyAvailable = true;
+                $latestHistory = null;
+                $portalCheck = bukaPortalKoneksi();
+                if ($portalCheck) {
+                    $tableCheck = mysqli_query(
+                        $portalCheck,
+                        "SELECT 1 FROM information_schema.tables
+                         WHERE table_schema = DATABASE()
+                           AND table_name = 'portal_queue_call_history'
+                         LIMIT 1"
+                    );
+                    $historyAvailable = ($tableCheck && mysqli_num_rows($tableCheck) > 0);
+                    if ($historyAvailable) {
+                        $stmtLatest = mysqli_prepare(
+                            $portalCheck,
+                            "SELECT no_rawat,no_reg
+                             FROM portal_queue_call_history
+                             WHERE tgl_registrasi=CURDATE()
+                               AND kd_poli=?
+                               AND kd_dokter=?
+                             ORDER BY called_at DESC,id DESC
+                             LIMIT 1"
+                        );
+                        if ($stmtLatest) {
+                            mysqli_stmt_bind_param($stmtLatest,'ss',$kdPoli,$kdDokter);
+                            mysqli_stmt_execute($stmtLatest);
+                            $latestHistory = mysqli_fetch_assoc(mysqli_stmt_get_result($stmtLatest)) ?: null;
+                            mysqli_stmt_close($stmtLatest);
+                        }
+                    }
+                    mysqli_close($portalCheck);
                 }
-                mysqli_close($dbCheck);
 
-                if ($historyAvailable) {
+                if ($latestHistory && !empty($latestHistory['no_rawat'])) {
+                    $raw = cleankar($latestHistory['no_rawat']);
                     $sqlAntri = "
-                        SELECT
-                            h.no_reg,
-                            c.nm_pasien
-                        FROM portal_queue_call_history h
-                        INNER JOIN reg_periksa b
-                            ON h.no_rawat = b.no_rawat
-                        INNER JOIN pasien c
-                            ON b.no_rkm_medis = c.no_rkm_medis
-                        WHERE h.tgl_registrasi = CURDATE()
-                          AND h.kd_poli = '{$kdPoli}'
-                          AND h.kd_dokter = '{$kdDokter}'
-                        ORDER BY h.called_at DESC, h.id DESC
+                        SELECT b.no_reg, c.nm_pasien
+                        FROM reg_periksa b
+                        INNER JOIN pasien c ON b.no_rkm_medis=c.no_rkm_medis
+                        WHERE b.no_rawat='{$raw}'
                         LIMIT 1
                     ";
                     $antri = bukaquery($sqlAntri);
+                } else if ($historyAvailable) {
+                    // History exists but has no event for this doctor/poli today.
+                    $antri = bukaquery("
+                        SELECT b.no_reg, c.nm_pasien
+                        FROM antripoli a
+                        INNER JOIN reg_periksa b ON a.no_rawat = b.no_rawat
+                        INNER JOIN pasien c ON b.no_rkm_medis = c.no_rkm_medis
+                        WHERE a.status='2'
+                          AND b.kd_poli = '{$kdPoli}'
+                          AND b.kd_dokter = '{$kdDokter}'
+                        ORDER BY a.no_rawat DESC
+                        LIMIT 1
+                    ");
                 } else {
                     $antri = bukaquery("
                         SELECT b.no_reg, c.nm_pasien
@@ -312,8 +347,6 @@ switch ($_GET['p']) {
                 }
 
                 if (mysqli_num_rows($antri) === 0 && $historyAvailable) {
-                    // History tersedia tetapi belum mempunyai event hari ini:
-                    // fallback ke pasien yang sedang dipanggil.
                     $antri = bukaquery("
                         SELECT b.no_reg, c.nm_pasien
                         FROM antripoli a
