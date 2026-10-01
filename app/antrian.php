@@ -141,30 +141,16 @@ switch ($_GET['p']) {
                 }
                 mysqli_stmt_close($stmtCall);
 
-                // Record the exact call event for the e-Pasien service estimate.
-                // Logging is intentionally non-blocking: if the history table
-                // has not been migrated yet, the queue call still succeeds.
-                $stmtHistory = mysqli_prepare(
-                    $db,
-                    "INSERT INTO portal_queue_call_history
-                        (tgl_registrasi, kd_dokter, kd_poli, no_rawat, no_reg, called_at)
-                     SELECT b.tgl_registrasi, a.kd_dokter, a.kd_poli, a.no_rawat, b.no_reg, NOW()
-                     FROM antripoli a
-                     INNER JOIN reg_periksa b ON b.no_rawat=a.no_rawat
-                     WHERE a.no_rawat=?
-                     LIMIT 1"
+                // Keep the clinical transaction isolated on Khanza.
+                // portal_queue_call_history is supplemental portal state and
+                // is written only after the Khanza transaction commits.
+                $historyEvent = array(
+                    'tgl_registrasi' => null,
+                    'kd_dokter' => $r['kd_dokter'],
+                    'kd_poli' => $r['kd_poli'],
+                    'no_rawat' => $r['no_rawat'],
+                    'no_reg' => $r['no_reg'],
                 );
-                if ($stmtHistory !== false) {
-                    mysqli_stmt_bind_param($stmtHistory, 's', $r['no_rawat']);
-                    if (!mysqli_stmt_execute($stmtHistory)) {
-                        error_log('queue call history insert failed: ' . mysqli_stmt_error($stmtHistory));
-                    }
-                    mysqli_stmt_close($stmtHistory);
-                } else {
-                    error_log('queue call history prepare failed');
-                }
-
-                unset($r['kd_poli'], $r['kd_dokter']);
                 $data[] = $r;
             }
 
@@ -181,6 +167,42 @@ switch ($_GET['p']) {
         }
 
         mysqli_close($db);
+
+        // Best-effort portal history write after the Khanza transaction commits.
+        // A history outage must never roll back or block the queue call.
+        if (!empty($historyEvent)) {
+            $portalDb = bukaPortalKoneksi();
+            if ($portalDb) {
+                $stmtHistory = mysqli_prepare(
+                    $portalDb,
+                    "INSERT INTO portal_queue_call_history
+                        (tgl_registrasi, kd_dokter, kd_poli, no_rawat, no_reg, called_at)
+                     SELECT tgl_registrasi, ?, ?, ?, ?, NOW()
+                     FROM reg_periksa
+                     WHERE no_rawat=?
+                     LIMIT 1"
+                );
+                if ($stmtHistory) {
+                    mysqli_stmt_bind_param(
+                        $stmtHistory,
+                        'sssss',
+                        $historyEvent['kd_dokter'],
+                        $historyEvent['kd_poli'],
+                        $historyEvent['no_rawat'],
+                        $historyEvent['no_reg'],
+                        $historyEvent['no_rawat']
+                    );
+                    if (!mysqli_stmt_execute($stmtHistory)) {
+                        error_log('queue portal history insert failed: '.mysqli_stmt_error($stmtHistory));
+                    }
+                    mysqli_stmt_close($stmtHistory);
+                } else {
+                    error_log('queue portal history prepare failed');
+                }
+                mysqli_close($portalDb);
+            }
+        }
+
         echo json_encode($data);
         break;
 
