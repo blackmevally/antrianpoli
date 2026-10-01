@@ -145,7 +145,7 @@ switch ($_GET['p']) {
                 // portal_queue_call_history is supplemental portal state and
                 // is written only after the Khanza transaction commits.
                 $historyEvent = array(
-                    'tgl_registrasi' => null,
+                    'tgl_registrasi' => date('Y-m-d'),
                     'kd_dokter' => $r['kd_dokter'],
                     'kd_poli' => $r['kd_poli'],
                     'no_rawat' => $r['no_rawat'],
@@ -177,20 +177,17 @@ switch ($_GET['p']) {
                     $portalDb,
                     "INSERT INTO portal_queue_call_history
                         (tgl_registrasi, kd_dokter, kd_poli, no_rawat, no_reg, called_at)
-                     SELECT tgl_registrasi, ?, ?, ?, ?, NOW()
-                     FROM reg_periksa
-                     WHERE no_rawat=?
-                     LIMIT 1"
+                     VALUES(?,?,?,?,?,NOW())"
                 );
                 if ($stmtHistory) {
                     mysqli_stmt_bind_param(
                         $stmtHistory,
                         'sssss',
+                        $historyEvent['tgl_registrasi'],
                         $historyEvent['kd_dokter'],
                         $historyEvent['kd_poli'],
                         $historyEvent['no_rawat'],
-                        $historyEvent['no_reg'],
-                        $historyEvent['no_rawat']
+                        $historyEvent['no_reg']
                     );
                     if (!mysqli_stmt_execute($stmtHistory)) {
                         error_log('queue portal history insert failed: '.mysqli_stmt_error($stmtHistory));
